@@ -1,0 +1,15 @@
+[package]
+name = "blinkengraphs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+model.workspace = true
+render.workspace = true
+fixtures.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

@@ -1,0 +1,75 @@
+name: release
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: rp
+
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }} -p blinkengraphs
+      - shell: bash
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/blinkengraphs.exe dist/blinkengraphs-${{ matrix.arch }}.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/
+
+  publish:
+    needs: [release-please, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/*.exe
+      - name: Rolling main-latest prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag -f main-latest "$GITHUB_SHA"
+          git push -f origin refs/tags/main-latest
+          gh release view main-latest >/dev/null 2>&1 || gh release create main-latest --prerelease \
+            --title "main (rolling)" --notes "Latest build of main. Unsigned; verify with: gh attestation verify <exe> -R ${{ github.repository }}"
+          gh release edit main-latest --target "$GITHUB_SHA"
+          gh release upload main-latest dist/*.exe --clobber
+      - if: needs.release-please.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release-please.outputs.tag }}" dist/*.exe --clobber

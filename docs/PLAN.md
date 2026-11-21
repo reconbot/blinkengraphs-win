@@ -104,22 +104,7 @@ spikes/tcp-hop/ M0 experiment, deleted once the decision is recorded.
 
 ## Milestones
 
-**M0: skeleton, pipeline, spike**
-- Workspace, `cargo-xwin` cross-compiling on Linux, and CI on `windows-latest` that builds x64 + ARM64.
-- `render` crate + `tools/screenshots` + publishing (orphan `ci-screenshots` branch, sticky PR comment, job summary).
-- release-please, the rolling `main-latest` prerelease, build attestations.
-- **TCP Hop Trace spike on CI**, with the result recorded as an ADR.
-
-**M1: Tray Icons, Probes, Panel**
-- Collector, Prober (ICMP/TCP/DNS, ICMP Hop Trace), in-memory History, Verdict.
-- Five Tray Icons, the egui Panel with live graphs and the Verdict, the menu for Metrics/Probes/intervals, TOML config, the hotkey, pausing when the display is off or the session is locked.
-- Measure the CPU/RAM budget.
-
-**M2: Taskbar Strip, persistent History** (M1 + M2 = v1.0)
-- Taskbar Strip with fallback, SQLite Rollups, history ranges in the Panel.
-
-**M3: Elevated Extras and distribution**
-- Bytes per process on the network (ETW), UDP Hop Traces, autostart via HKCU Run, SignPath Authenticode, installer if wanted.
+See [`README.md`](../README.md#milestones).
 
 ## Risks / open items
 
