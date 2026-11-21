@@ -135,7 +135,10 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
         panel.range = range;
         let mut themed = false;
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(460.0, 1080.0))
+            .with_size(egui::vec2(
+                460.0,
+                if tab == Tab::Settings { 1500.0 } else { 1080.0 },
+            ))
             .with_pixels_per_point(2.0)
             .allow_missing_glyphs()
             .with_accessibility_check(false)

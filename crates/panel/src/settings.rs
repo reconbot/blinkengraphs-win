@@ -161,11 +161,7 @@ fn interval(ui: &mut Ui, label: &str, ms: &mut u64) {
     });
 }
 
-const WIDTHS: [f32; 7] = [0.0, 40.0, 96.0, 96.0, 40.0, 44.0, 22.0];
-
-/// UDP probes default to the traceroute port: almost always closed, so the host answers with
-/// port-unreachable and the round trip is measurable.
-const UDP_DEFAULT: u16 = 33434;
+const WIDTHS: [f32; 7] = [0.0, 32.0, 52.0, 52.0, 30.0, 34.0, 16.0];
 
 fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>, gi: usize) {
     ui.horizontal(|ui| {
@@ -182,8 +178,13 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
     });
     ui.add_space(4.0);
     crate::table_cells(ui, &WIDTHS, false, |i, ui| {
-        let h = ["Target", "ICMP", "TCP port", "UDP port", "DNS", "Trace", ""][i];
-        ui.label(RichText::new(h).small().weak());
+        let h = ["Target", "ICMP", "TCP", "UDP", "DNS", "Trace", ""][i];
+        let label = ui.label(RichText::new(h).small().weak());
+        if i == 3 {
+            label.on_hover_text(
+                "A closed port works: the host answers port-unreachable. Try 33434.",
+            );
+        }
     });
     let mut remove = None;
     for (ri, row) in g.targets.iter_mut().enumerate() {
@@ -200,12 +201,12 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
                     }
                 }
                 1 => {
-                    ui.checkbox(&mut row.icmp, "");
+                    ui.add(egui::Checkbox::without_text(&mut row.icmp));
                 }
-                2 => port(ui, &mut row.tcp, 443),
-                3 => port(ui, &mut row.udp, UDP_DEFAULT),
+                2 => port(ui, &mut row.tcp),
+                3 => port(ui, &mut row.udp),
                 4 => {
-                    ui.checkbox(&mut row.dns, "");
+                    ui.add(egui::Checkbox::without_text(&mut row.dns));
                 }
                 5 => {
                     ui.add_enabled(traceable, egui::Checkbox::without_text(&mut row.trace))
@@ -233,11 +234,18 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
     }
 }
 
-/// Checkbox plus port: unchecked stores `None`, so the column round-trips through TOML as absent.
-fn port(ui: &mut Ui, value: &mut Option<u16>, default: u16) {
-    let mut on = value.is_some();
-    let mut p = value.unwrap_or(default);
-    ui.add_enabled(on, egui::DragValue::new(&mut p).range(1..=65535));
-    ui.checkbox(&mut on, "");
-    *value = on.then_some(p);
+/// Empty means off.
+fn port(ui: &mut Ui, value: &mut Option<u16>) {
+    let mut text = value.map(|p| p.to_string()).unwrap_or_default();
+    let edit = egui::TextEdit::singleline(&mut text)
+        .hint_text("off")
+        .desired_width(f32::INFINITY)
+        .align(egui::Align2::RIGHT_CENTER);
+    if ui.add(edit).changed() {
+        match text.trim().parse::<u16>() {
+            Ok(p) if p > 0 => *value = Some(p),
+            _ if text.trim().is_empty() => *value = None,
+            _ => {}
+        }
+    }
 }
