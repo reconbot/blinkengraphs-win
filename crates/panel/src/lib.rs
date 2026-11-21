@@ -17,11 +17,15 @@ pub struct View<'a> {
     pub now: u64,
     pub elevated: bool,
     pub config_error: Option<&'a str>,
+    /// Status of the last history export.
+    pub notice: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     ConfigChanged,
+    /// Write all stored history to a CSV file.
+    ExportHistory,
     Quit,
 }
 
@@ -40,24 +44,28 @@ pub enum Range {
     Hour,
     Day,
     Week,
+    /// From the oldest stored minute to now.
+    All,
 }
 
 impl Range {
-    const ALL: [Range; 5] = [
+    const ALL: [Range; 6] = [
         Range::Min1,
         Range::Min15,
         Range::Hour,
         Range::Day,
         Range::Week,
+        Range::All,
     ];
 
-    fn secs(self) -> u64 {
+    fn secs(self, h: &History, now: u64) -> u64 {
         match self {
             Range::Min1 => 60,
             Range::Min15 => 900,
             Range::Hour => 3600,
             Range::Day => 86_400,
             Range::Week => 604_800,
+            Range::All => h.oldest().map_or(60, |t| now.saturating_sub(t).max(60)),
         }
     }
 
@@ -68,6 +76,7 @@ impl Range {
             Range::Hour => "1h",
             Range::Day => "24h",
             Range::Week => "7d",
+            Range::All => "All",
         }
     }
 }
@@ -127,8 +136,12 @@ impl Panel {
                     Tab::Overview => self.overview(ui, view, config),
                     Tab::Network => self.network(ui, view, config),
                     Tab::Settings => {
-                        if settings::show(ui, config, view) {
+                        let mut export = false;
+                        if settings::show(ui, config, view, &mut export) {
                             actions.push(Action::ConfigChanged);
+                        }
+                        if export {
+                            actions.push(Action::ExportHistory);
                         }
                     }
                 });
@@ -377,12 +390,12 @@ impl Panel {
     fn window(&self, view: &View) -> Window {
         Window {
             now: view.now as f64,
-            secs: self.range.secs() as f64,
+            secs: self.range.secs(view.history, view.now) as f64,
         }
     }
 
     fn points(&self, view: &View, key: &Key) -> Vec<Point> {
-        let secs = self.range.secs();
+        let secs = self.range.secs(view.history, view.now);
         view.history.series(
             key,
             view.now.saturating_sub(secs),

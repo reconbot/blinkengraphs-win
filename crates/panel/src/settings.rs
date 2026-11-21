@@ -5,8 +5,8 @@ use model::Aggregate;
 use model::{Probe, Readout, Section, Target};
 use palette::{Palette, Preset, Rgb, Shade};
 
-/// Returns true when `config` changed.
-pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
+/// Returns true when `config` changed. Sets `export` when the user asks for a CSV.
+pub fn show(ui: &mut Ui, config: &mut Config, view: &View, export: &mut bool) -> bool {
     let before = config.clone();
 
     group(ui, "General", |ui| {
@@ -102,6 +102,20 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
             text.push_str(&format!(" Using {} now.", verdict::bytes(s.bytes as f64)));
         }
         ui.label(RichText::new(text).small().weak());
+        ui.horizontal(|ui| {
+            if ui
+                .button("Export all to CSV")
+                .on_hover_text(
+                    "Every stored minute of every series, written to your Downloads folder",
+                )
+                .clicked()
+            {
+                *export = true;
+            }
+            if let Some(n) = view.notice {
+                ui.label(RichText::new(n).small().weak());
+            }
+        });
     });
 
     group(ui, "Sampling", |ui| {

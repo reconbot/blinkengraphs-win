@@ -163,6 +163,7 @@ pub struct History {
     db: Option<Connection>,
     flushed_minute: u64,
     storage: Option<Storage>,
+    oldest_minute: Option<u64>,
 }
 
 /// What the history database holds now.
@@ -213,6 +214,7 @@ impl History {
             db,
             flushed_minute: 0,
             storage: None,
+            oldest_minute: None,
         }
     }
 
@@ -431,6 +433,19 @@ impl History {
         self.storage
     }
 
+    /// Unix seconds of the oldest data held anywhere: SQLite as of the last flush, else RAM.
+    pub fn oldest(&self) -> Option<u64> {
+        let ram = self
+            .ram
+            .values()
+            .filter_map(|q| q.front().map(|(t, _)| *t))
+            .min();
+        match (self.oldest_minute, ram) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     pub fn set_rollup_days(&mut self, days: u32) {
         self.rollup_secs = days.max(1) as u64 * 86_400;
     }
@@ -511,7 +526,109 @@ impl History {
                 * one("PRAGMA page_size"),
             minutes: one("SELECT COUNT(*) FROM minute"),
         });
+        self.oldest_minute = db
+            .query_row("SELECT MIN(minute) FROM minute", [], |r| {
+                r.get::<_, Option<i64>>(0)
+            })
+            .ok()
+            .flatten()
+            .map(|m| m as u64);
     }
+}
+
+/// Writes every stored Minute of every key to `out` as CSV, reading `db` through its own connection
+/// so the engine keeps sampling. Returns the number of rows.
+pub fn export_csv(db: &Path, out: &Path) -> std::io::Result<u64> {
+    use std::io::Write;
+    let err = |e: rusqlite::Error| std::io::Error::other(e);
+    let c =
+        Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+    let mut stmt = c
+        .prepare(
+            "SELECT k.name, m.minute, m.n, m.lost, m.sum, m.min, m.max, m.sk FROM minute m
+             JOIN key k ON k.id = m.key ORDER BY k.name, m.minute",
+        )
+        .map_err(err)?;
+    let mut rows = stmt.query([]).map_err(err)?;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(out)?);
+    writeln!(
+        w,
+        "series,minute_utc,unix,samples,lost,loss,avg,min,max,p50,p95,p99"
+    )?;
+    let mut count = 0;
+    while let Some(r) = rows.next().map_err(err)? {
+        let sk: Vec<u8> = r.get(7).map_err(err)?;
+        let m = Minute {
+            n: r.get::<_, i64>(2).map_err(err)? as u64,
+            lost: r.get::<_, i64>(3).map_err(err)? as u64,
+            sum: r.get::<_, Option<f64>>(4).map_err(err)?.unwrap_or(0.0),
+            min: r
+                .get::<_, Option<f64>>(5)
+                .map_err(err)?
+                .unwrap_or(f64::INFINITY),
+            max: r
+                .get::<_, Option<f64>>(6)
+                .map_err(err)?
+                .unwrap_or(f64::NEG_INFINITY),
+            sketch: Sketch::decode(&sk).unwrap_or_default(),
+        };
+        let at = r.get::<_, i64>(1).map_err(err)? as u64;
+        let name: String = r.get(0).map_err(err)?;
+        let v = |a| m.value(a).map(|v| format!("{v}")).unwrap_or_default();
+        let bound = |v: f64| {
+            if m.n > 0 {
+                format!("{v}")
+            } else {
+                String::new()
+            }
+        };
+        writeln!(
+            w,
+            "{},{},{at},{},{},{},{},{},{},{},{},{}",
+            csv_field(&name),
+            utc(at),
+            m.n,
+            m.lost,
+            m.loss(),
+            v(Aggregate::Avg),
+            bound(m.min),
+            bound(m.max),
+            v(Aggregate::P50),
+            v(Aggregate::P95),
+            v(Aggregate::P99),
+        )?;
+        count += 1;
+    }
+    w.flush()?;
+    Ok(count)
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// ISO 8601 UTC, from Howard Hinnant's days-to-civil algorithm (https://howardhinnant.github.io/date_algorithms.html).
+fn utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:00Z",
+        rem / 3600,
+        rem % 3600 / 60
+    )
 }
 
 fn point(at: u64, m: &Minute, agg: Aggregate) -> Point {
@@ -721,6 +838,38 @@ mod tests {
         assert_eq!(estimate_bytes(10, 1, Some(big)), 1_440_000);
         drop(h);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn utc_formats_known_dates() {
+        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(1_800_000_000), "2027-01-15T08:00:00Z");
+        assert_eq!(utc(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn export_writes_every_minute() {
+        let dir = std::env::temp_dir().join(format!("bg-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("h.db");
+        let out = dir.join("h.csv");
+        let mut h = History::open(Some(&db), 1, 7);
+        feed(&mut h, 6000, 6000 + 300, |t| {
+            (t % 30 != 0).then_some((t % 7) as f32)
+        });
+        assert_eq!(h.oldest(), Some(6000));
+        let rows = export_csv(&db, &out).unwrap();
+        assert_eq!(rows, 4);
+        let text = std::fs::read_to_string(&out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("series,minute_utc,unix,"));
+        assert!(
+            lines[1].starts_with("probe:icmp 1.1.1.1,1970-01-01T01:40:00Z,6000,58,2,"),
+            "{}",
+            lines[1]
+        );
+        drop(h);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
