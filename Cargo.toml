@@ -18,6 +18,7 @@ collect = { path = "crates/collect" }
 probe = { path = "crates/probe" }
 panel = { path = "crates/panel" }
 meters = { path = "crates/meters" }
+engine = { path = "crates/engine" }
 tiny-skia = "0.11"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"

@@ -1,7 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg_attr(not(windows), allow(dead_code))]
-mod engine;
 #[cfg(windows)]
 mod strip;
 #[cfg(windows)]

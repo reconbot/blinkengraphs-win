@@ -452,19 +452,16 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 name = "blinkengraphs"
 version = "0.1.0"
 dependencies = [
- "collect",
  "config",
  "eframe",
  "embed-manifest",
+ "engine",
  "global-hotkey",
- "history",
  "meters",
  "model",
  "panel",
- "probe",
  "render",
  "tray-icon",
- "verdict",
  "windows-sys 0.61.2",
 ]
 
@@ -1054,6 +1051,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "engine"
+version = "0.1.0"
+dependencies = [
+ "collect",
+ "config",
+ "history",
+ "model",
+ "probe",
+ "verdict",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,6 +1241,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "835ae9d781464a79026cde387f9cbc650c9a4909d7cf7e658b127e3c35d2f35d"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "footprint"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "engine",
+ "meters",
+ "model",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

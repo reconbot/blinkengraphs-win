@@ -1,10 +1,8 @@
-use crate::{
-    engine::{Command, Engine},
-    strip::Strip,
-};
+use crate::strip::Strip;
 use config::Config;
 use config::Surface;
 use eframe::egui::{self, ViewportCommand};
+use engine::{Command, Engine};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use model::Section;
 use panel::{Action, Panel, Tab, View};

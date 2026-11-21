@@ -52,6 +52,14 @@ jobs:
             ./target/${{ matrix.target }}/release/tcp-hop.exe 1.1.1.1 443 15
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - if: matrix.target == 'x86_64-pc-windows-msvc'
+        name: footprint
+        shell: bash
+        run: |
+          {
+            echo "## Footprint (60 s, default config, Panel closed)"
+            cargo run -q --release -p footprint -- 60 target/x86_64-pc-windows-msvc/release/blinkengraphs.exe
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
         run: cargo run --release -p screenshots -- out
       - if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@v7
