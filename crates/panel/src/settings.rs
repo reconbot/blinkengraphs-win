@@ -76,6 +76,34 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
         ui.push_id(("monitor", section), |ui| monitor(ui, config, section));
     }
 
+    group(ui, "History", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Keep history for");
+            ui.add(
+                egui::DragValue::new(&mut config.history.rollup_days)
+                    .range(1..=config::HistoryConfig::MAX_DAYS)
+                    .suffix(" days"),
+            );
+        });
+        let series = model::Metric::ALL.len()
+            + config
+                .groups
+                .iter()
+                .filter(|g| g.enabled)
+                .map(|g| g.latency_probes().len() + g.dns_probes().len())
+                .sum::<usize>();
+        let measured = view.history.storage();
+        let estimate = history::estimate_bytes(series, config.history.rollup_days, measured);
+        let mut text = format!(
+            "About {} on disk for {series} series at one row per minute.",
+            verdict::bytes(estimate as f64)
+        );
+        if let Some(s) = measured {
+            text.push_str(&format!(" Using {} now.", verdict::bytes(s.bytes as f64)));
+        }
+        ui.label(RichText::new(text).small().weak());
+    });
+
     group(ui, "Sampling", |ui| {
         interval(ui, "System metrics", &mut config.system_interval_ms);
         interval(

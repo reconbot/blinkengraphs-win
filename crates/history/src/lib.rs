@@ -162,6 +162,25 @@ pub struct History {
     last_sample: Option<Sample>,
     db: Option<Connection>,
     flushed_minute: u64,
+    storage: Option<Storage>,
+}
+
+/// What the history database holds now.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Storage {
+    pub bytes: u64,
+    pub minutes: u64,
+}
+
+/// Bytes per stored Minute when the database is too young to measure (research 06, synthetic data).
+const BYTES_PER_MINUTE_ROW: f64 = 94.0;
+
+/// Disk needed to keep `days` of history for `series` keys, from the measured row size once there is enough data.
+pub fn estimate_bytes(series: usize, days: u32, measured: Option<Storage>) -> u64 {
+    let per_row = measured
+        .filter(|s| s.minutes >= 1000)
+        .map_or(BYTES_PER_MINUTE_ROW, |s| s.bytes as f64 / s.minutes as f64);
+    (series as f64 * days as f64 * 1440.0 * per_row) as u64
 }
 
 impl History {
@@ -193,6 +212,7 @@ impl History {
             last_sample: None,
             db,
             flushed_minute: 0,
+            storage: None,
         }
     }
 
@@ -406,6 +426,15 @@ impl History {
         out
     }
 
+    /// Measured at each minute's flush; `None` without a database.
+    pub fn storage(&self) -> Option<Storage> {
+        self.storage
+    }
+
+    pub fn set_rollup_days(&mut self, days: u32) {
+        self.rollup_secs = days.max(1) as u64 * 86_400;
+    }
+
     /// Stored Minutes for `key` in `[from, to)`, ascending.
     pub fn minutes(&self, key: &Key, from: u64, to: u64) -> Vec<(u64, Minute)> {
         let Some(db) = &self.db else { return vec![] };
@@ -476,6 +505,12 @@ impl History {
             params![now.saturating_sub(self.rollup_secs) as i64],
         );
         let _ = tx.commit();
+        let one = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64;
+        self.storage = Some(Storage {
+            bytes: one("PRAGMA page_count").saturating_sub(one("PRAGMA freelist_count"))
+                * one("PRAGMA page_size"),
+            minutes: one("SELECT COUNT(*) FROM minute"),
+        });
     }
 }
 
@@ -661,6 +696,29 @@ mod tests {
         assert_eq!(two[1].value, 29.5);
         let p95 = h.series(&key, 6120, 6180, 60, Aggregate::P95)[0].value;
         assert!((p95 - 56.0).abs() / 56.0 <= 1.0 / 65.0, "{p95}");
+        drop(h);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn storage_is_measured_and_estimated() {
+        let path = std::env::temp_dir().join(format!("bg-history-size-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut h = History::open(Some(&path), 1, 7);
+        assert_eq!(h.storage(), None);
+        feed(&mut h, 6000, 6000 + 300, |t| Some((t % 7) as f32));
+        let s = h.storage().unwrap();
+        assert_eq!(s.minutes, 4);
+        assert!(s.bytes > 0);
+        assert_eq!(
+            estimate_bytes(20, 7, Some(s)),
+            (20.0 * 7.0 * 1440.0 * 94.0) as u64
+        );
+        let big = Storage {
+            bytes: 2_000_000,
+            minutes: 20_000,
+        };
+        assert_eq!(estimate_bytes(10, 1, Some(big)), 1_440_000);
         drop(h);
         let _ = std::fs::remove_file(&path);
     }
