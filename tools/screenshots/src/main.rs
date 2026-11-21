@@ -29,6 +29,10 @@ fn main() {
         sheet(&s).save_png(out.join(&file)).unwrap();
         writeln!(index, "| {} | ![{}]({prefix}{file}) |", s.caption, s.name).unwrap();
     }
+    index.push_str("\n| Panel | |\n|---|---|\n");
+    for (file, caption) in panels(&out) {
+        writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
+    }
     fs::write(out.join("index.md"), index).unwrap();
 }
 
@@ -91,4 +95,82 @@ fn blit(dst: &mut Pixmap, src: &Pixmap, x: u32, y: u32, scale: u32) {
     };
     let t = Transform::from_row(scale as f32, 0.0, 0.0, scale as f32, x as f32, y as f32);
     dst.draw_pixmap(0, 0, src.as_ref(), &paint, t, None);
+}
+
+const NOW: u64 = 1_800_000_000;
+
+fn panels(out: &std::path::Path) -> Vec<(String, String)> {
+    use panel::{Panel, Tab, View};
+    let mut shots = Vec::new();
+    let mut targets = vec![
+        ("isp-loss", Tab::Overview),
+        ("upload-saturation", Tab::Overview),
+        ("isp-loss", Tab::Network),
+    ];
+    targets.push(("idle", Tab::Settings));
+    for (name, tab) in targets {
+        let s = fixtures::all()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap();
+        let mut h = history::History::open(None, 15, 7);
+        fixtures::populate(&mut h, &s, NOW);
+        let probes: Vec<_> = h
+            .probes()
+            .into_iter()
+            .map(|p| {
+                let st = h.stat(&p, 30);
+                (p, st)
+            })
+            .collect();
+        let peak = h
+            .recent(&history::Key::Metric(model::Metric::NetUp), 900)
+            .into_iter()
+            .flatten()
+            .fold(0.0f32, f32::max) as f64;
+        let findings = verdict::diagnose(&verdict::Input {
+            sample: h.last_sample(),
+            probes: &probes,
+            upload_peak_bps: peak,
+        });
+        let processes = fixtures::processes();
+        let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
+        let mut config = config::Config::default();
+        let mut panel = Panel {
+            tab,
+            ..Panel::default()
+        };
+        let mut themed = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(460.0, 760.0))
+            .with_pixels_per_point(2.0)
+            .allow_missing_glyphs()
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_ui(|ui| {
+                if !themed {
+                    panel::theme::install(ui.ctx());
+                    themed = true;
+                }
+                let view = View {
+                    history: &h,
+                    findings: &findings,
+                    processes: &processes,
+                    adapters: &adapters,
+                    now: NOW,
+                    elevated: false,
+                    config_error: None,
+                };
+                panel.show(ui, &view, &mut config);
+            });
+        harness.run_steps(4);
+        let file = format!("panel-{name}-{tab:?}.png").to_lowercase();
+        harness
+            .render()
+            .expect("wgpu render")
+            .save(out.join(&file))
+            .unwrap();
+        shots.push((file, format!("{tab:?} · {}", s.caption)));
+    }
+    shots
 }

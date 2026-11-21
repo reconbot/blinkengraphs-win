@@ -10,3 +10,10 @@ model.workspace = true
 render.workspace = true
 fixtures.workspace = true
 tiny-skia.workspace = true
+history.workspace = true
+config.workspace = true
+verdict.workspace = true
+panel.workspace = true
+egui = { version = "0.37", features = ["default_fonts"] }
+egui_kittest = { version = "0.37", features = ["wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

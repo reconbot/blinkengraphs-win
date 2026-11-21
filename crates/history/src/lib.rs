@@ -125,6 +125,16 @@ impl History {
         }
     }
 
+    pub fn probes(&self) -> Vec<Probe> {
+        self.ram
+            .keys()
+            .filter_map(|k| match k {
+                Key::Probe(p) => Some(p.clone()),
+                Key::Metric(_) => None,
+            })
+            .collect()
+    }
+
     pub fn last_sample(&self) -> Option<&Sample> {
         self.last_sample.as_ref()
     }
