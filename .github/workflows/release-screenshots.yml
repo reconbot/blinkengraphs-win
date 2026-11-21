@@ -1,0 +1,48 @@
+name: release-screenshots
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to annotate
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  notes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append screenshots for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          sha=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
+          raw="https://raw.githubusercontent.com/$GH_REPO/ci-screenshots/$sha"
+          body=$(gh release view "$TAG" --json body --jq .body)
+          if grep -q '<!-- screenshots -->' <<<"$body"; then exit 0; fi
+          cat > notes.md <<NOTES
+          $body
+
+          <!-- screenshots -->
+          ## Screenshots
+
+          Rendered by CI from fixture data at \`${sha:0:7}\`.
+
+          | Panel | Network |
+          |---|---|
+          | ![Panel]($raw/panel-isp-loss-overview.png) | ![Network]($raw/panel-isp-loss-network.png) |
+
+          **Taskbar Strip**
+
+          ![Strip]($raw/strip-upload-saturation.png)
+
+          **Tray Icons** (actual size, then 4× zoom)
+
+          ![Tray Icons]($raw/isp-loss.png)
+          NOTES
+          gh release edit "$TAG" --notes-file notes.md
