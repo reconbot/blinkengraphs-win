@@ -17,12 +17,15 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
+    Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, WAIT_OBJECT_0},
     System::{
         StationsAndDesktops::{
             CloseDesktop, DESKTOP_SWITCHDESKTOP, OpenInputDesktop, SwitchDesktop,
         },
-        Threading::CreateMutexW,
+        Threading::{
+            CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SetEvent,
+            WaitForSingleObject,
+        },
     },
     UI::{
         HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi},
@@ -37,7 +40,11 @@ enum UiEvent {
     Menu(MenuEvent),
     Hotkey(GlobalHotKeyEvent),
     StripClick,
+    /// Another launch found this one running and asked it to show the Panel.
+    Relaunched,
 }
+
+const SHOW_EVENT: &str = "Local\\blinkengraphs-show\0";
 
 pub fn run() {
     let name: Vec<u16> = "Local\\blinkengraphs-single-instance\0"
@@ -46,9 +53,16 @@ pub fn run() {
     unsafe {
         CreateMutexW(std::ptr::null(), 0, name.as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            let show: Vec<u16> = SHOW_EVENT.encode_utf16().collect();
+            let e = OpenEventW(EVENT_MODIFY_STATE, 0, show.as_ptr());
+            if !e.is_null() {
+                SetEvent(e);
+                CloseHandle(e);
+            }
             return;
         }
     }
+    install_crash_log();
     let path = config::dir().join("config.toml");
     let (config, error) = Config::load(&path);
     let options = eframe::NativeOptions {
@@ -124,6 +138,8 @@ impl App {
         MenuEvent::set_event_handler(Some(move |e| f(UiEvent::Menu(e))));
         let strip_click = forward(tx.clone(), ctx.clone());
         let strip = Strip::new(move || strip_click(UiEvent::StripClick));
+        let relaunch = forward(tx.clone(), ctx.clone());
+        watch_relaunch(move || relaunch(UiEvent::Relaunched));
         let f = forward(tx, ctx.clone());
         GlobalHotKeyEvent::set_event_handler(Some(move |e| f(UiEvent::Hotkey(e))));
 
@@ -356,6 +372,7 @@ impl App {
 
     fn quit(&self) -> ! {
         let _ = self.config.save(&self.path);
+        self.engine.shutdown(Duration::from_secs(3));
         std::process::exit(0)
     }
 }
@@ -397,6 +414,7 @@ impl eframe::App for App {
                 }
                 UiEvent::Hotkey(_) => {}
                 UiEvent::StripClick => self.toggle(ctx, None),
+                UiEvent::Relaunched => self.show(ctx, None, None),
             }
         }
         self.redraw_icons();
@@ -582,4 +600,44 @@ fn idle() -> bool {
         CloseDesktop(desk);
         ok == 0
     }
+}
+
+/// A second launch sets the named event; this thread turns that into showing the Panel.
+fn watch_relaunch(on_show: impl Fn() + Send + 'static) {
+    let name: Vec<u16> = SHOW_EVENT.encode_utf16().collect();
+    let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) } as usize;
+    if event == 0 {
+        return;
+    }
+    std::thread::spawn(move || {
+        loop {
+            if unsafe { WaitForSingleObject(event as HANDLE, INFINITE) } != WAIT_OBJECT_0 {
+                return;
+            }
+            on_show();
+        }
+    });
+}
+
+/// Release builds abort on panic with no console, so the reason is otherwise lost.
+fn install_crash_log() {
+    let path = config::dir().join("crash.log");
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(
+                f,
+                "{} v{} {info}\n{}",
+                model::now(),
+                env!("CARGO_PKG_VERSION"),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        default(info);
+    }));
 }

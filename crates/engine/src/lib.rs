@@ -30,6 +30,8 @@ pub struct Shared {
 
 pub enum Command {
     Reconfigure(Box<Config>),
+    /// Save what a restart would lose, reply on the channel, then stop.
+    Shutdown(std::sync::mpsc::Sender<()>),
 }
 
 pub struct Engine {
@@ -77,6 +79,13 @@ impl Engine {
 
     pub fn send(&self, c: Command) {
         let _ = self.commands.send(c);
+    }
+
+    /// Waits up to `timeout` for the engine to save history; a stuck engine must not block Quit.
+    pub fn shutdown(&self, timeout: Duration) -> bool {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.send(Command::Shutdown(tx));
+        rx.recv_timeout(timeout).is_ok()
     }
 }
 
@@ -150,6 +159,11 @@ fn run(
                     .history
                     .set_rollup_days(c.history.rollup_days);
                 config = *c;
+            }
+            Ok(Command::Shutdown(done)) => {
+                shared.lock().unwrap().history.close(model::now());
+                let _ = done.send(());
+                return;
             }
             Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}

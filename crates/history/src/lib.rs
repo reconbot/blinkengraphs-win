@@ -23,6 +23,20 @@ impl Key {
             Key::Probe(p) => format!("probe:{p}"),
         }
     }
+
+    fn from_id(id: &str) -> Option<Key> {
+        if let Some(m) = id.strip_prefix("metric:") {
+            return Metric::ALL
+                .into_iter()
+                .find(|x| format!("{x:?}") == m)
+                .map(Key::Metric);
+        }
+        let (protocol, target) = id.strip_prefix("probe:")?.split_once(' ')?;
+        Some(Key::Probe(Probe {
+            protocol: model::Protocol::try_from(protocol.to_string()).ok()?,
+            target: model::Target::from(target.to_string()),
+        }))
+    }
 }
 
 /// One graph bucket starting at `at`: the chosen aggregate (NaN when nothing replied) and the lost fraction.
@@ -199,13 +213,16 @@ impl History {
                    key INTEGER NOT NULL, minute INTEGER NOT NULL,
                    n INTEGER NOT NULL, lost INTEGER NOT NULL,
                    sum REAL, min REAL, max REAL, sk BLOB NOT NULL,
-                   PRIMARY KEY (key, minute)) WITHOUT ROWID;",
+                   PRIMARY KEY (key, minute)) WITHOUT ROWID;
+                 CREATE TABLE IF NOT EXISTS recent (
+                   key TEXT NOT NULL, at INTEGER NOT NULL, v REAL,
+                   PRIMARY KEY (key, at)) WITHOUT ROWID;",
             )
             .ok()?;
             migrate_v1(&c);
             Some(c)
         });
-        Self {
+        let mut h = Self {
             ram_secs: ram_minutes as u64 * 60,
             rollup_secs: rollup_days as u64 * 86_400,
             ram: HashMap::new(),
@@ -215,7 +232,9 @@ impl History {
             flushed_minute: 0,
             storage: None,
             oldest_minute: None,
-        }
+        };
+        h.restore();
+        h
     }
 
     pub fn record_sample(&mut self, s: &Sample) {
@@ -428,6 +447,56 @@ impl History {
         out
     }
 
+    /// Saves what a restart would otherwise lose: the unfinished minute's rollup and the raw RAM samples.
+    pub fn close(&mut self, now: u64) {
+        let from = self.flushed_minute;
+        let Some(db) = &mut self.db else { return };
+        let Ok(tx) = db.transaction() else { return };
+        let _ = tx.execute("DELETE FROM recent", []);
+        for (key, q) in &self.ram {
+            let id = key.id();
+            let mut minute: Vec<Option<f32>> = Vec::new();
+            let mut at = None;
+            for (t, v) in q {
+                let _ = tx.execute(
+                    "INSERT OR REPLACE INTO recent VALUES (?1, ?2, ?3)",
+                    params![id, *t as i64, v.map(f64::from)],
+                );
+                if *t >= from && *t <= now {
+                    if at.is_some_and(|a| a != t / 60 * 60) {
+                        flush_one(&tx, &id, at.unwrap(), &minute);
+                        minute.clear();
+                    }
+                    at = Some(t / 60 * 60);
+                    minute.push(*v);
+                }
+            }
+            if let Some(a) = at {
+                flush_one(&tx, &id, a, &minute);
+            }
+        }
+        let _ = tx.commit();
+    }
+
+    /// Reloads the raw samples `close` saved, then forgets them so they're read once.
+    fn restore(&mut self) {
+        let Some(db) = &self.db else { return };
+        let rows: Vec<(String, i64, Option<f64>)> = db
+            .prepare("SELECT key, at, v FROM recent ORDER BY at")
+            .and_then(|mut s| {
+                s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default();
+        let _ = db.execute("DELETE FROM recent", []);
+        let oldest = model::now().saturating_sub(self.ram_secs) as i64;
+        for (id, at, v) in rows.into_iter().filter(|r| r.1 >= oldest) {
+            if let Some(key) = Key::from_id(&id) {
+                self.push(key, at as u64, v.map(|v| v as f32));
+            }
+        }
+    }
+
     /// Measured at each minute's flush; `None` without a database.
     pub fn storage(&self) -> Option<Storage> {
         self.storage
@@ -629,6 +698,11 @@ fn utc(secs: u64) -> String {
         rem / 3600,
         rem % 3600 / 60
     )
+}
+
+fn flush_one(c: &Connection, key: &str, at: u64, values: &[Option<f32>]) {
+    let _ = c.execute("INSERT OR IGNORE INTO key (name) VALUES (?1)", params![key]);
+    write_minute(c, key, at, &Minute::of(values));
 }
 
 fn point(at: u64, m: &Minute, agg: Aggregate) -> Point {
@@ -870,6 +944,37 @@ mod tests {
         );
         drop(h);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn close_keeps_recent_samples_and_the_unfinished_minute() {
+        let path = std::env::temp_dir().join(format!("bg-history-close-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let key = Key::Probe(probe());
+        let t0 = (model::now() - 200) / 60 * 60;
+        {
+            let mut h = History::open(Some(&path), 15, 7);
+            feed(&mut h, t0, t0 + 150, |t| {
+                (!(t - t0).is_multiple_of(50)).then_some((t % 9) as f32)
+            });
+            h.close(t0 + 150);
+        }
+        let h = History::open(Some(&path), 15, 7);
+        let raw = h.recent(&key, 1000);
+        assert_eq!(raw.len(), 150, "1 s samples survive a restart");
+        assert_eq!(raw[0], None);
+        let minutes = h.minutes(&key, t0, t0 + 200);
+        assert_eq!(
+            minutes.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            [t0, t0 + 60, t0 + 120]
+        );
+        assert_eq!(
+            minutes[2].1.n + minutes[2].1.lost,
+            30,
+            "the unfinished minute is stored"
+        );
+        drop(h);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
