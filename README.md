@@ -61,6 +61,15 @@ Tray Icons (actual size, then 4× zoom):
   - Autostart
 - [ ] **M4: Elevated Extras.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md))
 
+## Repositories
+
+| Repo | Contents |
+|---|---|
+| [blinkengraphs](https://github.com/reconbot/blinkengraphs) | Landing page and shared spec |
+| [blinkengraphs-win](https://github.com/reconbot/blinkengraphs-win) | Windows 11 app (Rust) |
+| [blinkengraphs-mac](https://github.com/reconbot/blinkengraphs-mac) | macOS menu bar app (planned) |
+| [blinkengraphs-ios](https://github.com/reconbot/blinkengraphs-ios) | iOS network diagnosis app (planned) |
+
 ## Docs
 
 - [`docs/PLAN.md`](docs/PLAN.md): decisions, defaults, architecture

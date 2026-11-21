@@ -11,3 +11,5 @@ Comments carry only what code can't: the why, the Win32 gotcha, the source URL. 
 Commits follow Conventional Commits; release-please builds the changelog from them.
 
 Commits, PRs and comments stay free of session links and personal or employer details; the repo is public.
+
+Never push to `main` once the repo has a release; land changes through a PR.
