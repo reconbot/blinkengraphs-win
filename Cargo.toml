@@ -6,7 +6,6 @@ members = ["crates/*", "tools/*", "spikes/*", "app"]
 version = "0.1.0" # x-release-please-version
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/reconbot/blinkengraphs"
 
 [workspace.dependencies]
 model = { path = "crates/model" }

@@ -7,16 +7,16 @@ publish = false
 
 [dependencies]
 model.workspace = true
-render.workspace = true
 config.workspace = true
 history.workspace = true
 verdict.workspace = true
 collect.workspace = true
 probe.workspace = true
-panel.workspace = true
-meters.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+render.workspace = true
+panel.workspace = true
+meters.workspace = true
 eframe = "0.37"
 tray-icon = "0.26"
 global-hotkey = "0.10"

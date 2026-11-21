@@ -168,7 +168,12 @@ unsafe fn paint(hwnd: HWND, img: &Image) -> bool {
         if ok {
             // tiny-skia is premultiplied RGBA; GDI wants premultiplied BGRA.
             let dst = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
-            for (d, s) in dst.chunks_exact_mut(4).zip(img.data().chunks_exact(4)) {
+            for (d, s) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(img.data().as_chunks::<4>().0)
+            {
                 d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
             }
             let old = SelectObject(mem, bmp);
