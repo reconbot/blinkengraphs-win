@@ -55,7 +55,20 @@ Tray Icons (actual size, then 4× zoom):
   - Themes, and a color per Probe
   - Per displayed Probe: time window and aggregate (p99, p95, p50, avg, max)
   - Graph aggregate for all graphs (same choices)
-- [ ] **M3: Elevated Extras and distribution.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md)); autostart; SignPath signing; installer
+- [ ] **M3: Distribution.**
+  - One MSI for per-user (no admin) or per-machine installs, interactive or `msiexec` switches, deployable through Intune; per-machine installs add the M4 service ([ADR 0010](docs/adr/0010-single-dual-mode-msi.md))
+  - Autostart
+- [ ] **Later: code signing** with Azure Artifact Signing ([ADR 0009](docs/adr/0009-azure-artifact-signing.md), deferred)
+- [ ] **M4: Elevated Extras.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md))
+
+## Repositories
+
+| Repo | Contents |
+|---|---|
+| [blinkengraphs](https://github.com/reconbot/blinkengraphs) | Landing page and shared spec |
+| [blinkengraphs-win](https://github.com/reconbot/blinkengraphs-win) | Windows 11 app (Rust) |
+| [blinkengraphs-mac](https://github.com/reconbot/blinkengraphs-mac) | macOS menu bar app (planned) |
+| [blinkengraphs-ios](https://github.com/reconbot/blinkengraphs-ios) | iOS network diagnosis app (planned) |
 
 ## Docs
 

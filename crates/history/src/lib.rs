@@ -44,7 +44,8 @@ pub struct Hop {
     pub worst_ms: Option<f32>,
 }
 
-const HOP_WINDOW: usize = 60;
+/// Replies kept per Hop.
+pub const HOP_WINDOW: usize = 60;
 /// The window "now" means for loss, RTT and the Verdict.
 pub const RECENT_SECS: u64 = 30;
 

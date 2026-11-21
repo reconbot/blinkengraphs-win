@@ -5,6 +5,8 @@ mod net;
 mod resolve;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod trace;
+pub use dns::QUERY_NAME;
+pub use trace::{FULL_SWEEP_EVERY, MAX_TTL};
 #[cfg(windows)]
 mod win;
 
@@ -21,7 +23,8 @@ use std::{
 };
 use trace::{Hop, PathMemory};
 
-const MAX_TIMEOUT: Duration = Duration::from_secs(1);
+/// A Probe's timeout is its interval, capped here.
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(1);
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug)]

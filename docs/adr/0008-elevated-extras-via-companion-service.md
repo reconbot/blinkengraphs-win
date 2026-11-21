@@ -7,7 +7,7 @@ An installer running as admin cannot make later launches elevated, and Administr
 - **The Elevated Extras are bytes per process and UDP Hop Traces.** An optional per-machine service reads the Microsoft-Windows-Kernel-Network ETW provider while the Panel is open, runs UDP Hop Traces over raw sockets, and serves both over a local named pipe whose ACL admits interactive users only.
 - **Account: LocalSystem.** Raw sockets need the Administrators group, which LocalService lacks. Research 04 ranked LocalService only on the condition that UDP Hop Traces were dropped; with two Extras needing the service, the user chose to keep them.
 - ICMP and TCP Hop Traces stay in the app, unprivileged (ADR 0006).
-- **Distribution:** a separate MSI, deployable by Intune or winget. Without it the app is unchanged.
+- **Distribution:** part of the single MSI, installed only by a per-machine install (ADR 0010). A per-user install runs without it, unchanged.
 
 ## Considered Options
 
