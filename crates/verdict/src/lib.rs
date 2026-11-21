@@ -210,7 +210,7 @@ fn self_saturation(input: &Input, internet: &[&(Probe, ProbeStat)]) -> Option<Fi
         warn(
             FaultDomain::SelfSaturation,
             format!(
-                "Upload saturated ({}/s): latency {:.0} ms vs {:.0} ms normal",
+                "Upload saturated ({}/s): {:.0} ms vs {:.0} ms normal",
                 bytes(up),
                 inflated.0,
                 inflated.1

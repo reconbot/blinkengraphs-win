@@ -180,7 +180,12 @@ impl Panel {
                 } else {
                     format_value(primary, v)
                 };
-                ui.label(RichText::new(text).size(18.0).strong());
+                let size = if section == Section::Network {
+                    14.0
+                } else {
+                    18.0
+                };
+                ui.label(RichText::new(text).size(size).strong());
             });
         });
         let mut lines = vec![(primary, accent(section))];
@@ -323,9 +328,9 @@ fn verdict_banner(ui: &mut Ui, findings: &[Finding]) {
         .inner_margin(10.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 dot(ui, color, 5.0);
-                ui.label(RichText::new(&top.headline).size(15.0).strong());
+                ui.add(egui::Label::new(RichText::new(&top.headline).size(15.0).strong()).wrap());
             });
             for f in &findings[1..] {
                 ui.label(

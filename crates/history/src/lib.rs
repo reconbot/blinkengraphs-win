@@ -177,7 +177,7 @@ impl History {
                 1.0 - replies.len() as f32 / window.len() as f32
             },
             rtt_ms: median(replies),
-            baseline_ms: median(all),
+            baseline_ms: percentile(all, 0.1),
             jitter_ms: jitter,
         }
     }
@@ -319,6 +319,15 @@ impl History {
         );
         let _ = tx.commit();
     }
+}
+
+/// Lowest-decile RTT: what the path does when nothing is queued, so a long congestion episode can't become "normal".
+fn percentile(mut v: Vec<f32>, p: f32) -> Option<f32> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(f32::total_cmp);
+    Some(v[((v.len() - 1) as f32 * p) as usize])
 }
 
 fn median(mut v: Vec<f32>) -> Option<f32> {

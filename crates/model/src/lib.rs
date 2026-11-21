@@ -256,7 +256,7 @@ pub struct HopResult {
 pub struct ProbeStat {
     pub loss: f32,
     pub rtt_ms: Option<f32>,
-    /// Median RTT over everything in RAM; what "normal" looks like.
+    /// 10th-percentile RTT over everything in RAM; what "normal" looks like.
     pub baseline_ms: Option<f32>,
     pub jitter_ms: Option<f32>,
 }
