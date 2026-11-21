@@ -13,6 +13,8 @@ model = { path = "crates/model" }
 render = { path = "crates/render" }
 fixtures = { path = "crates/fixtures" }
 tiny-skia = "0.11"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 
 [profile.release]
 lto = true

@@ -622,6 +622,9 @@ dependencies = [
 [[package]]
 name = "model"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "muda"
