@@ -4,7 +4,7 @@ use std::{
 };
 
 pub const MAX_TTL: u8 = 30;
-const FULL_SWEEP_EVERY: Duration = Duration::from_secs(30);
+pub const FULL_SWEEP_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hop {

@@ -129,11 +129,19 @@ fn network(input: &Input) -> Vec<Finding> {
             .iter()
             .any(|p| matches!(p.0.protocol, Protocol::Tcp(_)) && p.1.loss < LOSS_WARN);
         let any_icmp = internet.iter().any(|p| p.0.protocol == Protocol::Icmp);
+        // Without a measured Gateway (none found, or the OS denied local network access) the LAN can't be cleared.
+        let gw = if gateway.is_empty() {
+            ""
+        } else {
+            "Gateway OK, "
+        };
         if net_best >= LOSS_DOWN {
-            out.push(crit(
-                FaultDomain::Isp,
-                "Gateway OK, internet unreachable: ISP or WAN problem".into(),
-            ));
+            let headline = if gateway.is_empty() {
+                "Internet unreachable, gateway not measured: ISP or WAN problem".into()
+            } else {
+                "Gateway OK, internet unreachable: ISP or WAN problem".into()
+            };
+            out.push(crit(FaultDomain::Isp, headline));
         } else if any_icmp && icmp_lost && tcp_ok {
             out.push(warn(
                 FaultDomain::IcmpFiltering,
@@ -155,7 +163,7 @@ fn network(input: &Input) -> Vec<Finding> {
                     domain: FaultDomain::Isp,
                     severity: sev,
                     headline: format!(
-                        "Gateway OK, {} losing {}: ISP problem",
+                        "{gw}{} losing {}: ISP problem",
                         bad.0.target,
                         pct(bad.1.loss)
                     ),
@@ -354,6 +362,22 @@ mod tests {
         let f = run(&ps, None);
         assert_eq!(f[0].domain, FaultDomain::Isp);
         assert!(f[0].headline.contains("12%"), "{}", f[0].headline);
+    }
+
+    #[test]
+    fn unmeasured_gateway_is_not_called_ok() {
+        let mut ps: Vec<_> = healthy().into_iter().skip(1).collect();
+        for i in 0..=2 {
+            set(&mut ps, i, st(1.0, 0.0, 12.0));
+        }
+        let f = run(&ps, None);
+        assert_eq!(f[0].domain, FaultDomain::Isp);
+        assert!(!f[0].headline.contains("Gateway OK"), "{}", f[0].headline);
+        for i in 0..=2 {
+            set(&mut ps, i, st(0.12, 40.0, 12.0));
+        }
+        let f = run(&ps, None);
+        assert!(!f[0].headline.contains("Gateway OK"), "{}", f[0].headline);
     }
 
     #[test]

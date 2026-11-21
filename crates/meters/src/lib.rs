@@ -30,11 +30,7 @@ fn series(section: Section, h: &History, config: &Config, shown: &[Readout], n: 
         if !latency {
             return Series::Loss(raw.iter().map(|r| loss && r.is_none()).collect());
         }
-        let baseline = h
-            .stat(&config.primary, history::RECENT_SECS)
-            .baseline_ms
-            .unwrap_or(20.0);
-        let scale = (baseline * 4.0).max(100.0);
+        let scale = latency_scale(h.stat(&config.primary, history::RECENT_SECS).baseline_ms);
         return Series::Latency(
             raw.into_iter()
                 .map(|r| match r {
@@ -65,6 +61,11 @@ fn series(section: Section, h: &History, config: &Config, shown: &[Readout], n: 
         Some(&m) => Series::Level(normalize(m, &h.recent(&Key::Metric(m), n))),
         None => Series::Level(vec![]),
     }
+}
+
+/// Full height of the Latency Meter: four times the baseline, at least 100 ms.
+pub fn latency_scale(baseline_ms: Option<f32>) -> f32 {
+    (baseline_ms.unwrap_or(20.0) * 4.0).max(100.0)
 }
 
 /// Draws one Section's Meter at `px` from the last `px` samples, showing `shown`.
