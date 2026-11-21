@@ -13,3 +13,5 @@ Commits follow Conventional Commits; release-please builds the changelog from th
 Commits, PRs and comments stay free of session links and personal or employer details; the repo is public.
 
 Never force-push `main` once the repo has a release.
+
+Release PRs (release-please) merge only after the owner has reviewed them and said so. Feature PRs merge when tests pass.

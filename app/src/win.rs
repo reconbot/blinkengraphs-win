@@ -9,7 +9,7 @@ use panel::{Action, Panel, Tab, View};
 use std::{
     path::PathBuf,
     str::FromStr,
-    sync::{atomic::Ordering, mpsc},
+    sync::{Arc, Mutex, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
 use tray_icon::{
@@ -90,6 +90,8 @@ struct App {
     font: Option<render::FontRef<'static>>,
     styled: bool,
     elevated: bool,
+    db: PathBuf,
+    export: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -130,7 +132,7 @@ impl App {
         watch_display();
         let engine = Engine::start(
             config.clone(),
-            Some(db),
+            Some(db.clone()),
             move || wake_ctx.request_repaint(),
             Box::new(idle),
         );
@@ -184,6 +186,8 @@ impl App {
             font: system_font(),
             styled: false,
             elevated: elevated(),
+            db,
+            export: Arc::default(),
         };
         app.apply_visibility();
         app.register_hotkey();
@@ -203,6 +207,30 @@ impl App {
         for (s, icon) in &self.icons {
             let _ = icon.set_visible(self.shown(*s));
         }
+    }
+
+    /// Runs off the UI thread with its own read-only connection; the result lands in the Panel's notice.
+    fn export_history(&self, ctx: egui::Context) {
+        let dir = std::env::var_os("USERPROFILE")
+            .map(|p| PathBuf::from(p).join("Downloads"))
+            .filter(|d| d.is_dir())
+            .unwrap_or_else(config::dir);
+        let out = dir.join(format!("blinkengraphs-history-{}.csv", model::now()));
+        let (db, status) = (self.db.clone(), self.export.clone());
+        *status.lock().unwrap() = Some("Exporting…".into());
+        std::thread::spawn(move || {
+            let msg = match history::export_csv(&db, &out) {
+                Ok(rows) => {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(format!("/select,{}", out.display()))
+                        .spawn();
+                    format!("Saved {rows} rows to {}", out.display())
+                }
+                Err(e) => format!("Export failed: {e}"),
+            };
+            *status.lock().unwrap() = Some(msg);
+            ctx.request_repaint();
+        });
     }
 
     fn register_hotkey(&mut self) {
@@ -387,6 +415,7 @@ impl eframe::App for App {
             return;
         }
         let shared = self.engine.shared.clone();
+        let notice = self.export.lock().unwrap().clone();
         let s = shared.lock().unwrap();
         let view = View {
             history: &s.history,
@@ -396,6 +425,7 @@ impl eframe::App for App {
             now: model::now(),
             elevated: self.elevated,
             config_error: self.error.as_deref(),
+            notice: notice.as_deref(),
         };
         let actions = self.panel.show(ui, &view, &mut self.config);
         drop(s);
@@ -411,6 +441,7 @@ impl eframe::App for App {
                     self.register_hotkey();
                     self.drawn_samples = u64::MAX;
                 }
+                Action::ExportHistory => self.export_history(ui.ctx().clone()),
                 Action::Quit => self.quit(),
             }
         }

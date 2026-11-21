@@ -9,6 +9,7 @@ publish = false
 [target.'cfg(windows)'.dependencies]
 model.workspace = true
 config.workspace = true
+history.workspace = true
 engine.workspace = true
 render.workspace = true
 panel.workspace = true

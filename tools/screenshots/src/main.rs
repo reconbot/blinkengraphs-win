@@ -167,6 +167,7 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
                     now: NOW,
                     elevated: false,
                     config_error: None,
+                    notice: None,
                 };
                 panel.show(ui, &view, &mut config);
             });
