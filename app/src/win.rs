@@ -1,6 +1,6 @@
 use crate::strip::Strip;
 use config::Config;
-use config::Surface;
+use config::{MenuIcon, Surface};
 use eframe::egui::{self, ViewportCommand};
 use engine::{Command, Engine};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
@@ -190,15 +190,18 @@ impl App {
         app
     }
 
-    /// With the Strip attached only the Latency icon stays, as the Menu Icon.
+    /// With the Strip attached only the Latency icon's slot stays, as the Menu Icon.
+    fn shown(&self, s: Section) -> bool {
+        if self.strip_attached {
+            s == Section::Latency
+        } else {
+            !self.config.section(s).tray.is_empty()
+        }
+    }
+
     fn apply_visibility(&self) {
         for (s, icon) in &self.icons {
-            let visible = if self.strip_attached {
-                *s == Section::Latency
-            } else {
-                self.config.section(*s).visible
-            };
-            let _ = icon.set_visible(visible);
+            let _ = icon.set_visible(self.shown(*s));
         }
     }
 
@@ -243,28 +246,30 @@ impl App {
             self.apply_visibility();
         }
         for (section, icon) in &self.icons {
-            let c = self.config.section(*section);
-            let shown = if attached {
-                *section == Section::Latency
-            } else {
-                c.visible
-            };
-            if !shown {
+            if !self.shown(*section) {
                 continue;
             }
-            let img = meters::draw(
-                *section,
-                &s.history,
-                &self.config,
-                &c.meter,
-                self.px,
-                taskbar,
-            );
+            let img = if attached {
+                meters::menu_icon(&s.history, &self.config, &s.findings, self.px, taskbar)
+            } else {
+                meters::draw(
+                    *section,
+                    &s.history,
+                    &self.config,
+                    &self.config.section(*section).tray,
+                    self.px,
+                    taskbar,
+                )
+            };
             if let Ok(i) = Icon::from_rgba(render::to_rgba(&img), self.px, self.px) {
                 let _ = icon.set_icon(Some(i));
             }
+            let tip = match self.config.menu_icon {
+                MenuIcon::Meter(m) if attached => m,
+                _ => *section,
+            };
             let _ = icon.set_tooltip(Some(meters::tooltip(
-                *section,
+                tip,
                 &s.history,
                 &self.config,
                 &s.findings,

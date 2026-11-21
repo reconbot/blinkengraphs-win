@@ -16,6 +16,16 @@ pub enum Meter<'a> {
     },
     /// `None` is a lost probe.
     Latency(&'a [Option<f32>]),
+    /// `true` is a lost probe; replies draw nothing.
+    Loss(&'a [bool]),
+}
+
+/// Colors the app icon by the Verdict's worst Finding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    Ok,
+    Warn,
+    Crit,
 }
 
 /// Normalized Meter value at which bars turn amber.
@@ -73,6 +83,37 @@ pub fn meter(section: Section, meter: &Meter, px: u32, taskbar: Taskbar) -> Imag
                     None => bar(&mut img, x, 0.0, h, loss(taskbar)),
                 }
             }
+        }
+        Meter::Loss(lost) => {
+            for (x, _) in tail(lost, px).filter(|(_, l)| **l) {
+                bar(&mut img, x, 0.0, h, loss(taskbar));
+            }
+        }
+    }
+    img
+}
+
+/// Three bars in the CPU, MEM and NET colors, or all in the Verdict's color.
+pub fn app_icon(px: u32, taskbar: Taskbar, status: Option<Status>) -> Image {
+    let mut img = Pixmap::new(px, px).expect("non-zero size");
+    let h = px as f32;
+    let w = (px / 4).max(1);
+    let gap = (px - 3 * w) / 4;
+    let bars = [
+        (Section::Cpu, 0.55),
+        (Section::Memory, 1.0),
+        (Section::Network, 0.75),
+    ];
+    for (i, (section, height)) in bars.into_iter().enumerate() {
+        let color = match status {
+            None => base(section, taskbar),
+            Some(Status::Ok) => pick(taskbar, (0x66, 0xbb, 0x6a), (0x2e, 0x7d, 0x32)),
+            Some(Status::Warn) => rgba(0xff, 0xb3, 0x40, 0xff),
+            Some(Status::Crit) => rgba(0xff, 0x5a, 0x5a, 0xff),
+        };
+        let left = gap + i as u32 * (w + gap);
+        for x in left..left + w {
+            bar(&mut img, x as f32, h * (1.0 - height), h, color);
         }
     }
     img
@@ -182,6 +223,26 @@ mod tests {
             Taskbar::Dark,
         );
         assert_eq!(pixel(&img, 15, 0), [0xff, 0x3b, 0x3b, 0xff]);
+    }
+
+    #[test]
+    fn loss_meter_marks_only_lost_probes() {
+        let img = meter(
+            Section::Latency,
+            &Meter::Loss(&[true, false]),
+            16,
+            Taskbar::Dark,
+        );
+        assert_eq!(pixel(&img, 14, 0), [0xff, 0x3b, 0x3b, 0xff]);
+        assert_eq!(pixel(&img, 15, 15)[3], 0);
+    }
+
+    #[test]
+    fn verdict_icon_takes_status_color() {
+        let img = app_icon(16, Taskbar::Dark, Some(Status::Crit));
+        assert_eq!(pixel(&img, 7, 15), [0xff, 0x5a, 0x5a, 0xff]);
+        let plain = app_icon(16, Taskbar::Dark, None);
+        assert_eq!(pixel(&plain, 7, 15), [0x9c, 0xcc, 0x65, 0xff]);
     }
 
     #[test]

@@ -31,7 +31,7 @@ fn main() {
                 section,
                 &s.history,
                 &config,
-                &c.meter,
+                &c.tray,
                 24,
                 render::Taskbar::Dark,
             ));

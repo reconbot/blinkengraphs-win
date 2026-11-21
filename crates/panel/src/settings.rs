@@ -1,45 +1,48 @@
 use crate::{View, theme};
-use config::{Adapter, Config, ProbeGroup, Surface, TargetRow};
+use config::{Adapter, Config, MenuIcon, ProbeGroup, Surface, TargetRow};
 use egui::{RichText, Ui};
-use model::{Metric, Probe, Section, Target};
+use model::{Probe, Readout, Section, Target};
 
 /// Returns true when `config` changed.
 pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
     let before = config.clone();
 
-    group(ui, "Display", |ui| {
+    group(ui, "General", |ui| {
         ui.horizontal(|ui| {
-            ui.label("Surface");
+            ui.label("Taskbar display");
+            ui.radio_value(&mut config.surface, Surface::TaskbarStrip, "Strip");
             ui.radio_value(&mut config.surface, Surface::TrayIcons, "Tray Icons");
-            ui.radio_value(&mut config.surface, Surface::TaskbarStrip, "Taskbar Strip");
         });
-        egui::Grid::new("metrics")
-            .num_columns(4)
-            .spacing([14.0, 4.0])
-            .show(ui, |ui| {
-                for h in ["Section / Metric", "Visible", "Meter", "Strip"] {
-                    ui.label(RichText::new(h).small().weak());
-                }
-                ui.end_row();
-                for section in Section::ALL {
-                    let c = config.section_mut(section);
-                    ui.label(
-                        RichText::new(section.label())
-                            .color(theme::accent(section))
-                            .strong(),
-                    );
-                    ui.checkbox(&mut c.visible, "");
-                    ui.end_row();
-                    for m in Metric::ALL.into_iter().filter(|m| m.section() == section) {
-                        ui.label(format!("   {}", m.label()));
-                        ui.label("");
-                        toggle(ui, &mut c.meter, m);
-                        toggle(ui, &mut c.strip, m);
-                        ui.end_row();
-                    }
-                }
-            });
+        ui.add_enabled_ui(config.surface == Surface::TaskbarStrip, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Tray icon");
+                egui::ComboBox::from_id_salt("menu_icon")
+                    .selected_text(config.menu_icon.label())
+                    .show_ui(ui, |ui| {
+                        let choices = [MenuIcon::App, MenuIcon::Verdict]
+                            .into_iter()
+                            .chain(Section::ALL.map(MenuIcon::Meter));
+                        for m in choices {
+                            ui.selectable_value(&mut config.menu_icon, m, m.label());
+                        }
+                    });
+            })
+            .response
+            .on_disabled_hover_text("With Tray Icons, each Section has its own icon");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Panel hotkey");
+            ui.text_edit_singleline(&mut config.hotkey);
+        });
+        ui.checkbox(
+            &mut config.pause_when_idle,
+            "Pause while locked or screen saver running",
+        );
     });
+
+    for section in Section::ALL {
+        ui.push_id(("monitor", section), |ui| monitor(ui, config, section));
+    }
 
     group(ui, "Sampling", |ui| {
         interval(ui, "System metrics", &mut config.system_interval_ms);
@@ -47,10 +50,6 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
             ui,
             "Process list (Panel open)",
             &mut config.process_interval_ms,
-        );
-        ui.checkbox(
-            &mut config.pause_when_idle,
-            "Pause while locked or screen saver running",
         );
         ui.horizontal(|ui| {
             ui.label("Network adapter");
@@ -71,26 +70,6 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
                     }
                 });
         });
-        ui.horizontal(|ui| {
-            ui.label("Panel hotkey");
-            ui.text_edit_singleline(&mut config.hotkey);
-        });
-    });
-
-    group(ui, "Latency Meter", |ui| {
-        let all: Vec<Probe> = config
-            .groups
-            .iter()
-            .flat_map(|g| g.latency_probes())
-            .collect();
-        egui::ComboBox::from_id_salt("primary")
-            .selected_text(config.primary.to_string())
-            .show_ui(ui, |ui| {
-                for p in all {
-                    let label = p.to_string();
-                    ui.selectable_value(&mut config.primary, p, label);
-                }
-            });
     });
 
     let mut remove_group = None;
@@ -116,7 +95,55 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
     *config != before
 }
 
-fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+const MONITOR_WIDTHS: [f32; 4] = [0.0, 44.0, 44.0, 44.0];
+
+/// One card per Section: which Readouts each Surface shows.
+fn monitor(ui: &mut Ui, config: &mut Config, section: Section) {
+    let title = RichText::new(section.label())
+        .color(theme::accent(section))
+        .strong();
+    group(ui, title, |ui| {
+        if section == Section::Latency {
+            ui.horizontal(|ui| {
+                ui.label("Probe");
+                let all: Vec<Probe> = config
+                    .groups
+                    .iter()
+                    .flat_map(|g| g.latency_probes())
+                    .collect();
+                egui::ComboBox::from_id_salt("primary")
+                    .selected_text(config.primary.to_string())
+                    .show_ui(ui, |ui| {
+                        for p in all {
+                            let label = p.to_string();
+                            ui.selectable_value(&mut config.primary, p, label);
+                        }
+                    });
+            });
+        }
+        crate::table_cells(ui, &MONITOR_WIDTHS, false, |i, ui| {
+            let h = ["", "Tray", "Strip", "Panel"][i];
+            ui.label(RichText::new(h).small().weak());
+        });
+        let c = config.section_mut(section);
+        for (ri, r) in Readout::ALL
+            .into_iter()
+            .filter(|r| r.section() == section)
+            .enumerate()
+        {
+            crate::table_cells(ui, &MONITOR_WIDTHS, ri % 2 == 1, |i, ui| match i {
+                0 => {
+                    ui.label(r.label());
+                }
+                1 => toggle(ui, &mut c.tray, r),
+                2 => toggle(ui, &mut c.strip, r),
+                _ => toggle(ui, &mut c.panel, r),
+            });
+        }
+    });
+}
+
+fn group(ui: &mut Ui, title: impl Into<RichText>, body: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(theme::CARD)
         .stroke(egui::Stroke::new(1.0, theme::CARD_EDGE))
@@ -124,19 +151,19 @@ fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
         .inner_margin(10.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(title).strong());
+            ui.label(title.into().strong());
             ui.add_space(4.0);
             body(ui);
         });
     ui.add_space(8.0);
 }
 
-fn toggle(ui: &mut Ui, list: &mut Vec<Metric>, m: Metric) {
+fn toggle(ui: &mut Ui, list: &mut Vec<Readout>, m: Readout) {
     let mut on = list.contains(&m);
-    if ui.checkbox(&mut on, "").changed() {
+    if ui.add(egui::Checkbox::without_text(&mut on)).changed() {
         if on {
             list.push(m);
-            list.sort_by_key(|x| Metric::ALL.iter().position(|y| y == x));
+            list.sort_by_key(|x| Readout::ALL.iter().position(|y| y == x));
         } else {
             list.retain(|x| *x != m);
         }

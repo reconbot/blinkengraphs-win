@@ -1,11 +1,11 @@
 mod settings;
 pub mod theme;
 
-use config::Config;
+use config::{Config, SectionConfig};
 use egui::{Align, Color32, Layout, RichText, Ui, vec2};
 use egui_plot::{Line, Plot, PlotPoints};
 use history::{History, Key, Point};
-use model::{Metric, Probe, ProcessRow, Section, Unit};
+use model::{Metric, Ping, Probe, ProcessRow, Readout, Section, Unit};
 use theme::{accent, card, severity_color};
 use verdict::{Finding, Severity, bytes};
 
@@ -120,7 +120,7 @@ impl Panel {
                     scroll = scroll.vertical_scroll_offset(0.0);
                 }
                 scroll.show(ui, |ui| match self.tab {
-                    Tab::Overview => self.overview(ui, view),
+                    Tab::Overview => self.overview(ui, view, config),
                     Tab::Network => self.network(ui, view, config),
                     Tab::Settings => {
                         if settings::show(ui, config, view) {
@@ -165,32 +165,53 @@ impl Panel {
         }
     }
 
-    fn overview(&mut self, ui: &mut Ui, view: &View) {
+    fn overview(&mut self, ui: &mut Ui, view: &View, config: &Config) {
         let s = view.history.last_sample();
-        for row in [
-            [Section::Cpu, Section::Memory],
-            [Section::Network, Section::Disk],
-        ] {
+        let shown: Vec<(Section, Vec<Metric>)> = [
+            Section::Cpu,
+            Section::Memory,
+            Section::Network,
+            Section::Disk,
+        ]
+        .into_iter()
+        .map(|section| {
+            (
+                section,
+                SectionConfig::metrics(&config.section(section).panel),
+            )
+        })
+        .filter(|(_, m)| !m.is_empty())
+        .collect();
+        for pair in shown.chunks(2) {
             ui.columns(2, |cols| {
-                for (col, section) in cols.iter_mut().zip(row) {
-                    card(col, section, |ui| self.section_card(ui, view, section, s));
+                for (col, (section, plotted)) in cols.iter_mut().zip(pair) {
+                    card(col, *section, |ui| {
+                        self.section_card(ui, view, *section, plotted, s)
+                    });
                 }
             });
             ui.add_space(8.0);
         }
-        card(ui, Section::Latency, |ui| {
-            self.latency_card(ui, view, false)
-        });
-        ui.add_space(8.0);
+        let ping = &config.section(Section::Latency).panel;
+        if !ping.is_empty() {
+            card(ui, Section::Latency, |ui| {
+                self.latency_card(ui, view, false, ping)
+            });
+            ui.add_space(8.0);
+        }
         processes(ui, view.processes, &mut self.sort);
     }
 
-    fn section_card(&self, ui: &mut Ui, view: &View, section: Section, s: Option<&model::Sample>) {
-        let metrics: Vec<Metric> = Metric::ALL
-            .into_iter()
-            .filter(|m| m.section() == section)
-            .collect();
-        let primary = metrics[0];
+    fn section_card(
+        &self,
+        ui: &mut Ui,
+        view: &View,
+        section: Section,
+        plotted: &[Metric],
+        s: Option<&model::Sample>,
+    ) {
+        let primary = plotted[0];
+        let duplex = plotted.contains(&Metric::NetDown) && plotted.contains(&Metric::NetUp);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(section.label())
@@ -199,27 +220,28 @@ impl Panel {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let v = s.map(|s| s.get(primary)).unwrap_or(0.0);
-                let text = if section == Section::Network {
+                let text = if duplex {
+                    let down = s.map(|s| s.get(Metric::NetDown)).unwrap_or(0.0);
                     let up = s.map(|s| s.get(Metric::NetUp)).unwrap_or(0.0);
-                    format!("↓{}/s ↑{}/s", bytes(v), bytes(up))
+                    format!("↓{}/s ↑{}/s", bytes(down), bytes(up))
                 } else {
                     format_value(primary, v)
                 };
-                let size = if section == Section::Network {
-                    14.0
-                } else {
-                    18.0
-                };
+                let size = if duplex { 14.0 } else { 18.0 };
                 ui.label(RichText::new(text).size(size).strong());
             });
         });
-        let mut lines = vec![(primary, accent(section))];
-        if section == Section::Network {
-            lines.push((Metric::NetUp, theme::UPLOAD));
-        }
-        let series: Vec<_> = lines
+        let series: Vec<_> = plotted
             .iter()
-            .map(|(m, c)| (m.label(), *c, self.points(view, &Key::Metric(*m))))
+            .enumerate()
+            .map(|(i, m)| {
+                let color = match (i, m) {
+                    (_, Metric::NetUp) => theme::UPLOAD,
+                    (0, _) => accent(section),
+                    _ => theme::series(i),
+                };
+                (m.label(), color, self.points(view, &Key::Metric(*m)))
+            })
             .collect();
         let fmt = move |v: f64| match primary.unit() {
             Unit::BytesPerSec => bytes(v),
@@ -235,10 +257,9 @@ impl Panel {
             self.window(view),
         );
         ui.horizontal_wrapped(|ui| {
-            for m in metrics
+            for m in Metric::ALL
                 .iter()
-                .skip(1)
-                .filter(|m| !(section == Section::Network && **m == Metric::NetUp))
+                .filter(|m| m.section() == section && !plotted.contains(m))
             {
                 let v = s.map(|s| s.get(*m)).unwrap_or(0.0);
                 ui.label(
@@ -255,7 +276,11 @@ impl Panel {
         }
     }
 
-    fn latency_card(&self, ui: &mut Ui, view: &View, all: bool) {
+    fn latency_card(&self, ui: &mut Ui, view: &View, all: bool, shown: &[Readout]) {
+        let (latency, loss) = (
+            shown.contains(&Readout::Ping(Ping::Latency)),
+            shown.contains(&Readout::Ping(Ping::Loss)),
+        );
         let probes = latency_probes(view.history, all);
         ui.horizontal(|ui| {
             ui.label(
@@ -270,11 +295,12 @@ impl Panel {
                         .rtt_ms
                         .map(|r| format!("{r:.0} ms"))
                         .unwrap_or("—".into());
-                    ui.label(
-                        RichText::new(format!("{rtt}  {:.0}% loss", st.loss * 100.0))
-                            .size(18.0)
-                            .strong(),
-                    );
+                    let text = match (latency, loss) {
+                        (true, true) => format!("{rtt}  {:.0}% loss", st.loss * 100.0),
+                        (true, false) => rtt,
+                        _ => format!("{:.0}% loss", st.loss * 100.0),
+                    };
+                    ui.label(RichText::new(text).size(18.0).strong());
                 }
             });
         });
@@ -317,7 +343,10 @@ impl Panel {
     }
 
     fn network(&self, ui: &mut Ui, view: &View, config: &Config) {
-        card(ui, Section::Latency, |ui| self.latency_card(ui, view, true));
+        let all = [Readout::Ping(Ping::Latency), Readout::Ping(Ping::Loss)];
+        card(ui, Section::Latency, |ui| {
+            self.latency_card(ui, view, true, &all)
+        });
         for trace in config
             .groups
             .iter()

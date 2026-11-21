@@ -1,4 +1,4 @@
-use model::{Metric, Probe, Protocol, Section, Target};
+use model::{Metric, Ping, Probe, Protocol, Readout, Section, Target};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -10,6 +10,7 @@ use std::{
 #[serde(default)]
 pub struct Config {
     pub surface: Surface,
+    pub menu_icon: MenuIcon,
     pub sections: Vec<SectionConfig>,
     pub adapter: Adapter,
     pub system_interval_ms: u64,
@@ -29,12 +30,104 @@ pub enum Surface {
     TaskbarStrip,
 }
 
+/// The one notification-area icon left while the Strip is attached; it opens the Panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum MenuIcon {
+    #[default]
+    App,
+    /// The app icon colored by the Verdict's worst Finding.
+    Verdict,
+    Meter(Section),
+}
+
+impl MenuIcon {
+    pub fn label(self) -> &'static str {
+        match self {
+            MenuIcon::App => "App icon",
+            MenuIcon::Verdict => "Verdict color",
+            MenuIcon::Meter(s) => s.label(),
+        }
+    }
+}
+
+impl From<MenuIcon> for String {
+    fn from(m: MenuIcon) -> String {
+        match m {
+            MenuIcon::App => "app".into(),
+            MenuIcon::Verdict => "verdict".into(),
+            MenuIcon::Meter(s) => s.label().to_lowercase(),
+        }
+    }
+}
+
+impl TryFrom<String> for MenuIcon {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, String> {
+        match s.as_str() {
+            "app" => Ok(MenuIcon::App),
+            "verdict" => Ok(MenuIcon::Verdict),
+            _ => Section::ALL
+                .into_iter()
+                .find(|x| x.label().eq_ignore_ascii_case(&s))
+                .map(MenuIcon::Meter)
+                .ok_or(format!("unknown menu icon {s:?}")),
+        }
+    }
+}
+
+/// Which Readouts each Surface shows for one Section. An empty list hides the Section there.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SectionConfig {
     pub section: Section,
-    pub visible: bool,
-    pub meter: Vec<Metric>,
-    pub strip: Vec<Metric>,
+    #[serde(default)]
+    pub tray: Vec<Readout>,
+    #[serde(default)]
+    pub strip: Vec<Readout>,
+    #[serde(default)]
+    pub panel: Vec<Readout>,
+    /// v1.0 fields; `normalize` converts them.
+    #[serde(default, skip_serializing)]
+    visible: Option<bool>,
+    #[serde(default, skip_serializing)]
+    meter: Option<Vec<Metric>>,
+}
+
+impl SectionConfig {
+    pub fn new(section: Section, tray: &[Readout], strip: &[Readout], panel: &[Readout]) -> Self {
+        Self {
+            section,
+            tray: tray.to_vec(),
+            strip: strip.to_vec(),
+            panel: panel.to_vec(),
+            visible: None,
+            meter: None,
+        }
+    }
+
+    pub fn metrics(list: &[Readout]) -> Vec<Metric> {
+        list.iter().filter_map(|r| r.metric()).collect()
+    }
+
+    /// v1.0 had one Visible switch per Section and no Panel choice; PING listed no Metrics.
+    fn absorb_legacy(&mut self, default: &SectionConfig) {
+        let Some(visible) = self.visible.take() else {
+            return;
+        };
+        let meter = self.meter.take().unwrap_or_default();
+        let ping = [Readout::Ping(Ping::Latency), Readout::Ping(Ping::Loss)];
+        if self.section == Section::Latency {
+            self.tray = ping.to_vec();
+            self.strip = ping.to_vec();
+        } else {
+            self.tray = meter.into_iter().map(Readout::Metric).collect();
+        }
+        if !visible {
+            self.tray.clear();
+            self.strip.clear();
+        }
+        self.panel = default.panel.clone();
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,12 +310,17 @@ fn probe(protocol: Protocol, target: Target) -> Probe {
 impl Default for Config {
     fn default() -> Self {
         use Metric::*;
-        let section = |section, meter: &[Metric], strip: &[Metric]| SectionConfig {
-            section,
-            visible: true,
-            meter: meter.to_vec(),
-            strip: strip.to_vec(),
+        let m = |list: &[Metric]| {
+            list.iter()
+                .copied()
+                .map(Readout::Metric)
+                .collect::<Vec<_>>()
         };
+        let all = |list: &[Metric]| {
+            let r = m(list);
+            SectionConfig::new(list[0].section(), &r, &r, &r)
+        };
+        let ping = [Readout::Ping(Ping::Latency), Readout::Ping(Ping::Loss)];
         let row = |target, icmp, tcp, dns, trace| TargetRow {
             target,
             icmp,
@@ -232,13 +330,14 @@ impl Default for Config {
             trace,
         };
         Self {
-            surface: Surface::TrayIcons,
+            surface: Surface::TaskbarStrip,
+            menu_icon: MenuIcon::App,
             sections: vec![
-                section(Section::Cpu, &[CpuTotal], &[CpuTotal]),
-                section(Section::Memory, &[MemCommit], &[MemCommit]),
-                section(Section::Network, &[NetDown, NetUp], &[NetDown, NetUp]),
-                section(Section::Disk, &[DiskActive], &[DiskActive]),
-                section(Section::Latency, &[], &[]),
+                all(&[CpuTotal]),
+                all(&[MemCommit]),
+                all(&[NetDown, NetUp]),
+                SectionConfig::new(Section::Disk, &m(&[DiskActive]), &[], &m(&[DiskActive])),
+                SectionConfig::new(Section::Latency, &ping, &ping, &ping),
             ],
             adapter: Adapter::FollowDefaultRoute,
             system_interval_ms: 1000,
@@ -292,8 +391,15 @@ impl Config {
         }
         let defaults = Config::default();
         for d in defaults.sections {
-            if !self.sections.iter().any(|c| c.section == d.section) {
-                self.sections.push(d);
+            match self.sections.iter_mut().find(|c| c.section == d.section) {
+                Some(c) => c.absorb_legacy(&d),
+                None => self.sections.push(d),
+            }
+        }
+        for c in &mut self.sections {
+            let section = c.section;
+            for list in [&mut c.tray, &mut c.strip, &mut c.panel] {
+                list.retain(|r| r.section() == section);
             }
         }
         self.sections
@@ -420,6 +526,77 @@ mod tests {
         );
         assert!(g.dns_probes().iter().all(|p| p.protocol == Protocol::Dns));
         assert_eq!(g.traces(), vec![probe(Protocol::Icmp, CLOUDFLARE)]);
+    }
+
+    #[test]
+    fn v1_sections_become_readout_lists() {
+        let c = Config::parse(
+            r#"
+            [[sections]]
+            section = "Cpu"
+            visible = true
+            meter = ["CpuTotal", "CpuKernel"]
+            strip = ["CpuTotal"]
+            [[sections]]
+            section = "Disk"
+            visible = false
+            meter = ["DiskActive"]
+            strip = ["DiskActive"]
+            [[sections]]
+            section = "Latency"
+            visible = true
+            meter = []
+            strip = []
+            "#,
+        )
+        .unwrap();
+        let cpu = c.section(Section::Cpu);
+        let ids = |l: &[Readout]| l.iter().map(|r| r.label()).collect::<Vec<_>>();
+        assert_eq!(ids(&cpu.tray), ["Total", "Kernel"]);
+        assert_eq!(ids(&cpu.strip), ["Total"]);
+        assert_eq!(ids(&cpu.panel), ["Total"]);
+        let disk = c.section(Section::Disk);
+        assert!(disk.tray.is_empty() && disk.strip.is_empty());
+        assert_eq!(ids(&disk.panel), ["Active time"]);
+        let ping = c.section(Section::Latency);
+        assert_eq!(ids(&ping.strip), ["Latency", "Loss"]);
+        assert_eq!(Config::parse(&c.to_toml()).unwrap(), c, "round-trips");
+    }
+
+    #[test]
+    fn menu_icon_is_a_word_in_toml() {
+        for m in [
+            MenuIcon::App,
+            MenuIcon::Verdict,
+            MenuIcon::Meter(Section::Network),
+        ] {
+            let c = Config {
+                menu_icon: m,
+                ..Config::default()
+            };
+            let text = c.to_toml();
+            assert!(text.contains(&format!("menu_icon = \"{}\"", String::from(m))));
+            assert_eq!(Config::parse(&text).unwrap().menu_icon, m);
+        }
+    }
+
+    #[test]
+    fn default_strip_is_cpu_mem_net_ping() {
+        let c = Config::default();
+        assert_eq!(c.surface, Surface::TaskbarStrip);
+        let on: Vec<_> = Section::ALL
+            .into_iter()
+            .filter(|s| !c.section(*s).strip.is_empty())
+            .collect();
+        assert_eq!(
+            on,
+            [
+                Section::Cpu,
+                Section::Memory,
+                Section::Network,
+                Section::Latency
+            ]
+        );
     }
 
     #[test]
