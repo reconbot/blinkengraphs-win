@@ -49,58 +49,41 @@ Budget: under 1% CPU and about 30 MB RAM when idle with the Panel closed. These 
 | System | All Section Metrics | 1 s |
 | Process Snapshot | Top processes per Section, only while the Panel is open | 1 s |
 
+### Decisions from the M1 review
+
+- A Meter graphs the first enabled Metric in its Section (Network graphs download and upload together). Metrics are kept in catalog order, so ticking order doesn't change which one is drawn.
+- The Latency Meter always shows RTT and loss for the primary Probe. Jitter and the per-Probe lines are Panel-only, so the Latency Section has no Metric toggles.
+- Memory "compressed" is dropped: it has no cheap counter without admin.
+- Gateway Probes are ICMP only, because home routers rarely accept TCP 443.
+- Hop rows are kept in RAM only; history ranges apply to Probes and Metrics.
+- The Panel uses a rounded dark Win11 frame. A Mica backdrop is deferred, because a failed backdrop on a transparent window would leave the window invisible.
+- Pause triggers: session locked, screen saver running, or display off (`GUID_CONSOLE_DISPLAY_STATE`).
+- The Gateway and system resolver follow the default route even when the Network adapter is pinned.
+
 ## Architecture
 
-It is a Cargo workspace. The **core crates are platform-neutral**, so they build, test and render screenshots on Linux. Only the adapter crates touch Win32.
+Platform-neutral crates build, test and render on Linux; only `collect`, `probe` and `app` call Win32 (behind `cfg(windows)` with Linux stubs).
 
 ```
 crates/
-  model/        Section, Metric, Sample, Probe, Target, Hop, Verdict types. No logic.
-  history/      Deep module: RAM ring buffer + SQLite Rollups behind one interface.
-  verdict/      Deep module: pure fn diagnose(&Snapshot) -> Verdict.
-  render/       Deep module: draw a Meter or the Strip to an RGBA image (tiny-skia).
-  panel/        egui Panel: takes a read-only view of History, Verdict and Process Snapshot.
-  config/       TOML load/save, defaults, migration.
-  collect-win/  Adapters: Metrics (PDH, GetSystemTimes, GetIfTable2, NtQuerySystemInformation).
-  probe-win/    Adapters: ICMP (IcmpSendEcho2), TCP connect (+ TTL/ICMP error info), UDP DNS.
-  surface-win/  Adapters: Tray Icons (tray-icon), Taskbar Strip (windows-rs, layered window).
-  fixtures/     Synthetic and recorded Samples/Probe results; fake adapters for tests.
-app/            blinkengraphs.exe: wiring, scheduler, power/lock handling, hotkey.
-tools/screenshots/  Renders every visual from fixtures to PNG (runs on Linux + Windows).
-spikes/tcp-hop/ M0 experiment, deleted once the decision is recorded.
+  model/     Section, Metric, Sample, Probe, Target, ProbeStat, Hop types
+  config/    TOML schema, defaults, load/save
+  history/   RAM ring + SQLite Rollups; probe stats; mtr hop rows
+  verdict/   diagnose(Input) -> Vec<Finding>
+  collect/   Collector: PDH, GetIfEntry2, NtQuerySystemInformation
+  probe/     Prober: ICMP (IcmpSendEcho2), TCP connect, UDP DNS, hop traces
+  render/    Meter and Strip images (tiny-skia, ab_glyph)
+  meters/    History + Config -> Meter/Strip images and tooltips
+  panel/     egui Panel and theme
+  fixtures/  synthetic scenarios for tests and screenshots
+app/         engine thread, Tray Icons, Taskbar Strip window, Panel window, hotkey
+tools/screenshots/  renders Meters, Strip and Panel from fixtures to PNG
 ```
 
-### Seams and interfaces
-
-**Collector** (`collect-win`, fake in `fixtures`)
-- Interface: `sample(&mut self, enabled: &MetricSet) -> Sample`.
-- Hides: PDH query handles, counter deltas, adapter following, and Process Snapshot enumeration (`snapshot_processes()`, called only while the Panel is open).
-- It's a real seam because it has two adapters: Windows and the fixture replay.
-
-**Prober** (`probe-win`, fake in `fixtures`)
-- Interface: `start(groups: Vec<ProbeGroup>) -> Receiver<ProbeResult>` and `reconfigure(...)`.
-- Hides: threads, timeouts, ICMP handle reuse, TTL sweeps for Hop Traces, Gateway discovery and DNS packet encoding.
-
-**History**
-- Interface: `record(Sample | ProbeResult)` and `series(metric_or_probe, range) -> Series`.
-- The caller never knows whether a range comes from RAM or from SQLite Rollups.
-
-**Verdict**
-- `diagnose(&Snapshot) -> Verdict`. It is pure and table-tested with fixture scenarios:
-  - Wi-Fi drop
-  - ISP loss
-  - Slow DNS
-  - ICMP filtered while TCP is fine
-  - Upload saturation
-  - CPU pinned
-
-**Renderer**
-- `render_meter(&MeterSpec, &Series, size) -> Image` and `render_strip(...)`.
-- Shared by both Surfaces and by the screenshots tool, so CI screenshots are pixel-identical to the app.
-
-**Surface** (`surface-win`)
-- Interface: `show(&[Image])` and `events() -> Receiver<SurfaceEvent>` (click, menu, anchor rect for the Panel).
-- Two adapters: Tray Icons and Taskbar Strip. The app swaps to Tray Icons when the Strip reports `Detached`.
+Seams:
+- `Collector` and `Prober` are the only adapters to the OS; the engine thread owns both and writes into `History`.
+- `verdict::diagnose` is pure and table-tested.
+- `meters` and `panel` read `History`; the same code draws the app and the CI screenshots.
 
 ## Milestones
 

@@ -100,3 +100,114 @@ impl Lcg {
         (self.0 >> 40) as f32 / (1u64 << 24) as f32
     }
 }
+
+const LINK_BPS: f64 = 12.5e6;
+const RTT_SCALE_MS: f32 = 120.0;
+
+/// Fills `h` with `s` converted to real units, ending at `now`, plus probes and a hop trace.
+pub fn populate(h: &mut history::History, s: &Scenario, now: u64) {
+    use model::{HopResult, Metric, Probe, ProbeResult, Protocol, Sample, Target};
+    let start = now - LEN as u64 + 1;
+    let ip = |a: &str| Target::Addr(a.parse().unwrap());
+    let probe = |protocol, target| Probe { protocol, target };
+    let mut r = Lcg(99);
+    for i in 0..LEN {
+        let at = start + i as u64;
+        let mut x = Sample {
+            at,
+            per_core: (0..8)
+                .map(|c| (s.cpu[i] * 100.0 * (0.6 + 0.1 * c as f32)).min(100.0))
+                .collect(),
+            ..Default::default()
+        };
+        x.set(Metric::CpuTotal, s.cpu[i] as f64 * 100.0);
+        x.set(Metric::CpuKernel, s.cpu[i] as f64 * 18.0);
+        x.set(Metric::CpuQueue, (s.cpu[i] * 6.0).floor() as f64);
+        x.set(Metric::MemCommit, s.memory[i] as f64 * 100.0);
+        x.set(Metric::MemPhysical, s.memory[i] as f64 * 90.0);
+        x.set(
+            Metric::MemHardFaults,
+            if s.memory[i] > 0.8 { 1400.0 } else { 20.0 },
+        );
+        x.set(Metric::NetDown, (s.down[i] as f64).powi(3) * LINK_BPS);
+        x.set(Metric::NetUp, (s.up[i] as f64).powi(3) * LINK_BPS);
+        x.set(Metric::DiskActive, s.disk[i] as f64 * 100.0);
+        x.set(Metric::DiskRead, s.disk[i] as f64 * 80e6);
+        x.set(Metric::DiskWrite, s.disk[i] as f64 * 30e6);
+        x.set(Metric::DiskResponse, s.disk[i] as f64 * 60.0);
+        x.set(Metric::DiskQueue, s.disk[i] as f64 * 4.0);
+        h.record_sample(&x);
+
+        let rtt = s.rtt[i].map(|v| v * RTT_SCALE_MS);
+        let jitter = |base: f32, r: &mut Lcg| base + r.next() * 3.0;
+        let results = [
+            (
+                probe(Protocol::Icmp, Target::Gateway),
+                Some(jitter(1.5, &mut r)),
+            ),
+            (probe(Protocol::Icmp, ip("1.1.1.1")), rtt),
+            (
+                probe(Protocol::Tcp(443), ip("1.1.1.1")),
+                rtt.map(|v| v + 1.2),
+            ),
+            (probe(Protocol::Icmp, ip("8.8.8.8")), rtt.map(|v| v + 2.5)),
+            (
+                probe(Protocol::Tcp(443), ip("8.8.8.8")),
+                rtt.map(|v| v + 3.1),
+            ),
+            (probe(Protocol::Dns, ip("1.1.1.1")), rtt.map(|v| v + 0.8)),
+            (
+                probe(Protocol::Dns, Target::SystemResolver),
+                rtt.map(|v| v + 6.0),
+            ),
+        ];
+        for (p, rtt_ms) in results {
+            h.record_probe(&ProbeResult {
+                probe: p,
+                at,
+                rtt_ms,
+            });
+        }
+        let trace = probe(Protocol::Icmp, ip("1.1.1.1"));
+        let path = [
+            "192.168.1.1",
+            "100.64.0.1",
+            "68.86.92.25",
+            "96.110.40.17",
+            "173.245.63.1",
+            "1.1.1.1",
+        ];
+        for (n, addr) in path.iter().enumerate() {
+            let share = (n + 1) as f32 / path.len() as f32;
+            let lost = n >= 2 && rtt.is_none();
+            h.record_hop(&HopResult {
+                trace: trace.clone(),
+                at,
+                ttl: n as u8 + 1,
+                addr: Some(addr.parse().unwrap()),
+                rtt_ms: (!lost).then(|| rtt.unwrap_or(30.0) * share + r.next()),
+                reached: n + 1 == path.len(),
+            });
+        }
+    }
+}
+
+pub fn processes() -> Vec<model::ProcessRow> {
+    [
+        ("MsMpEng.exe", 38.2, 412e6, 21e6),
+        ("OneDrive.exe", 12.4, 180e6, 3.2e6),
+        ("chrome.exe", 9.8, 1.6e9, 0.4e6),
+        ("Teams.exe", 6.1, 820e6, 0.1e6),
+        ("code.exe", 3.3, 640e6, 0.2e6),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (name, cpu, mem, disk))| model::ProcessRow {
+        name: name.into(),
+        pid: 1000 + i as u32,
+        cpu_pct: cpu,
+        memory_bytes: mem as u64,
+        disk_bps: disk,
+    })
+    .collect()
+}

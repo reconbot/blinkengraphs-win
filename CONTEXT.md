@@ -54,8 +54,12 @@ _Avoid_: node, router
 
 ### Explaining
 
+**Finding**:
+One rule-based conclusion: a Fault Domain, a severity, and a one-line headline.
+_Avoid_: alert, issue, problem
+
 **Verdict**:
-A plain-language conclusion about the current Fault Domain, such as "Gateway OK, 1.1.1.1 losing 12% → ISP problem", derived only from rules.
+The current Findings, most severe first; the top one is the headline, such as "Gateway OK, 1.1.1.1 losing 12% → ISP problem".
 _Avoid_: diagnosis, alert, insight
 
 **Fault Domain**:
@@ -83,6 +87,10 @@ _Avoid_: systray, menu-bar item
 **Taskbar Strip**:
 The Surface where all Meters sit side by side, docked inside the taskbar. When it is active, a single Menu Icon stays in the tray.
 _Avoid_: deskband, toolbar, overlay
+
+**Menu Icon**:
+The single Tray Icon kept while the Taskbar Strip is attached; it carries the right-click menu and shows the Latency Meter.
+_Avoid_: app icon
 
 **Panel**:
 The detail window that opens from any Meter or the hotkey. It shows the Verdict, history graphs, Hop Traces, and the Process Snapshot.

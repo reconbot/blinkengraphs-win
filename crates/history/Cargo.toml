@@ -1,0 +1,10 @@
+[package]
+name = "history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+model.workspace = true
+rusqlite = { version = "0.43", features = ["bundled"] }

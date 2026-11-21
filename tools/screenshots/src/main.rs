@@ -29,6 +29,14 @@ fn main() {
         sheet(&s).save_png(out.join(&file)).unwrap();
         writeln!(index, "| {} | ![{}]({prefix}{file}) |", s.caption, s.name).unwrap();
     }
+    index.push_str("\n| Taskbar Strip | |\n|---|---|\n");
+    for (file, caption) in strips(&out) {
+        writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
+    }
+    index.push_str("\n| Panel | |\n|---|---|\n");
+    for (file, caption) in panels(&out) {
+        writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
+    }
     fs::write(out.join("index.md"), index).unwrap();
 }
 
@@ -91,4 +99,99 @@ fn blit(dst: &mut Pixmap, src: &Pixmap, x: u32, y: u32, scale: u32) {
     };
     let t = Transform::from_row(scale as f32, 0.0, 0.0, scale as f32, x as f32, y as f32);
     dst.draw_pixmap(0, 0, src.as_ref(), &paint, t, None);
+}
+
+const NOW: u64 = 1_800_000_000;
+
+fn panels(out: &std::path::Path) -> Vec<(String, String)> {
+    use panel::{Panel, Tab, View};
+    let mut shots = Vec::new();
+    let mut targets = vec![
+        ("isp-loss", Tab::Overview),
+        ("upload-saturation", Tab::Overview),
+        ("isp-loss", Tab::Network),
+    ];
+    targets.push(("idle", Tab::Settings));
+    for (name, tab) in targets {
+        let s = fixtures::all()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap();
+        let mut h = history::History::open(None, 15, 7);
+        fixtures::populate(&mut h, &s, NOW);
+        let findings = verdict::from_history(&h);
+        let processes = fixtures::processes();
+        let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
+        let mut config = config::Config::default();
+        let mut panel = Panel {
+            tab,
+            ..Panel::default()
+        };
+        let mut themed = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(460.0, 760.0))
+            .with_pixels_per_point(2.0)
+            .allow_missing_glyphs()
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_ui(|ui| {
+                if !themed {
+                    panel::theme::install(ui.ctx());
+                    themed = true;
+                }
+                let view = View {
+                    history: &h,
+                    findings: &findings,
+                    processes: &processes,
+                    adapters: &adapters,
+                    now: NOW,
+                    elevated: false,
+                    config_error: None,
+                };
+                panel.show(ui, &view, &mut config);
+            });
+        harness.run_steps(4);
+        let file = format!("panel-{name}-{tab:?}.png").to_lowercase();
+        harness
+            .render()
+            .expect("wgpu render")
+            .save(out.join(&file))
+            .unwrap();
+        shots.push((file, format!("{tab:?} · {}", s.caption)));
+    }
+    shots
+}
+
+fn font_bytes() -> Option<Vec<u8>> {
+    [
+        r"C:\Windows\Fonts\segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    .iter()
+    .find_map(|p| fs::read(p).ok())
+}
+
+fn strips(out: &std::path::Path) -> Vec<(String, String)> {
+    let bytes = font_bytes();
+    let font = bytes
+        .as_deref()
+        .and_then(|b| render::FontRef::try_from_slice(b).ok());
+    let config = config::Config::default();
+    let scale = 1.5;
+    let height = (48.0 * scale) as u32;
+    fixtures::all()
+        .iter()
+        .map(|s| {
+            let mut h = history::History::open(None, 15, 7);
+            fixtures::populate(&mut h, s, NOW);
+            let strip = meters::strip(&h, &config, height, scale, font.as_ref());
+            let w = strip.width() + (220.0 * scale) as u32;
+            let mut bar = Pixmap::new(w, height).unwrap();
+            bar.fill(Color::from_rgba8(0x1c, 0x1c, 0x1c, 0xff));
+            blit(&mut bar, &strip, (40.0 * scale) as u32, 0, 1);
+            let file = format!("strip-{}.png", s.name);
+            bar.save_png(out.join(&file)).unwrap();
+            (file, s.caption.to_string())
+        })
+        .collect()
 }

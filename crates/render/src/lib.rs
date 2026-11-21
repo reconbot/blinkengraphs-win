@@ -3,6 +3,10 @@ use tiny_skia::{Color, Pixmap};
 
 pub use tiny_skia::Pixmap as Image;
 
+mod strip;
+pub use ab_glyph::FontRef;
+pub use strip::{Cell, strip, width as strip_width};
+
 /// Values are normalized to 0..=1; the newest sample is last.
 pub enum Meter<'a> {
     Level(&'a [f32]),

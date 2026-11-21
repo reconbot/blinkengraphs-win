@@ -19,11 +19,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
       - run: cargo test
 
   windows:
@@ -36,10 +34,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
       - if: matrix.target == 'x86_64-pc-windows-msvc'
         run: cargo test --target ${{ matrix.target }}
       - if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -86,6 +87,9 @@ jobs:
           git fetch -q --depth 1 origin ci-screenshots && git checkout -q FETCH_HEAD || git checkout -q --orphan ci-screenshots
           mkdir -p "$SHA" && cp ../out/*.png "$SHA/"
           git add "$SHA"
+          if [ "${{ github.event_name }}" = push ]; then
+            rm -rf main && mkdir main && cp ../out/*.png main/ && git add -A main
+          fi
           git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -qm "screenshots $SHA"
           git push -q origin HEAD:ci-screenshots
           prefix="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/$SHA/"

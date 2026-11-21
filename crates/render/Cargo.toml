@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 model.workspace = true
 tiny-skia.workspace = true
+ab_glyph = "0.2"

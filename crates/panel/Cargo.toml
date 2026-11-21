@@ -1,0 +1,18 @@
+[package]
+name = "panel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+model.workspace = true
+config.workspace = true
+history.workspace = true
+verdict.workspace = true
+egui = { version = "0.37", features = ["default_fonts"] }
+egui_plot = "0.38"
+
+[dev-dependencies]
+fixtures.workspace = true
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }

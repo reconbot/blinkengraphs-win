@@ -6,13 +6,21 @@ members = ["crates/*", "tools/*", "spikes/*", "app"]
 version = "0.1.0" # x-release-please-version
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/reconbot/blinkengraphs"
 
 [workspace.dependencies]
 model = { path = "crates/model" }
 render = { path = "crates/render" }
 fixtures = { path = "crates/fixtures" }
+config = { path = "crates/config" }
+history = { path = "crates/history" }
+verdict = { path = "crates/verdict" }
+collect = { path = "crates/collect" }
+probe = { path = "crates/probe" }
+panel = { path = "crates/panel" }
+meters = { path = "crates/meters" }
 tiny-skia = "0.11"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 
 [profile.release]
 lto = true
