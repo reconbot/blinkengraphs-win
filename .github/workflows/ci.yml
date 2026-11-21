@@ -65,13 +65,6 @@ jobs:
             echo "## Footprint (60 s, default config, Panel closed)"
             cargo run -q --release -p footprint -- 60 target/x86_64-pc-windows-msvc/release/blinkengraphs.exe
           } | tee -a "$GITHUB_STEP_SUMMARY"
-      - if: matrix.target == 'x86_64-pc-windows-msvc'
-        run: cargo run --release -p screenshots -- out
-      - if: matrix.target == 'x86_64-pc-windows-msvc'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: screenshots
-          path: out/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: blinkengraphs-${{ matrix.target }}
@@ -79,49 +72,3 @@ jobs:
             target/${{ matrix.target }}/release/blinkengraphs.exe
             target/${{ matrix.target }}/release/tcp-hop.exe
 
-  screenshots:
-    needs: windows
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: screenshots
-          path: out
-      - name: Push to ci-screenshots branch
-        id: push
-        env:
-          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          git init -q pub && cd pub
-          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
-          git fetch -q --depth 1 origin ci-screenshots && git checkout -q FETCH_HEAD || git checkout -q --orphan ci-screenshots
-          mkdir -p "$SHA" && cp ../out/*.png "$SHA/"
-          git add "$SHA"
-          if [ "${{ github.event_name }}" = push ]; then
-            rm -rf main && mkdir main && cp ../out/*.png main/ && git add -A main
-          fi
-          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -qm "screenshots $SHA"
-          git push -q origin HEAD:ci-screenshots
-          prefix="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/$SHA/"
-          sed "s#](\([^)]*\.png\))#](${prefix}\1)#" ../out/index.md > ../index.md
-          { echo "## Screenshots"; cat ../index.md; } >> "$GITHUB_STEP_SUMMARY"
-      - if: github.event_name == 'pull_request'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
-        with:
-          script: |
-            const marker = '<!-- blinkengraphs-screenshots -->';
-            const body = `${marker}\n## Screenshots (${context.payload.pull_request.head.sha.slice(0, 7)})\n\n` +
-              require('fs').readFileSync('index.md', 'utf8');
-            const { owner, repo } = context.repo;
-            const issue_number = context.issue.number;
-            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
-            const existing = comments.find(c => c.body.startsWith(marker));
-            if (existing) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }

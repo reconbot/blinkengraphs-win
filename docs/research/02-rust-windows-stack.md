@@ -1,6 +1,6 @@
 # 02 — Rust stack for a Windows 11 tray system monitor
 
-Researched 2026-11-21. Target: a Rust app for Windows 11 on a corporate machine (Entra-joined, possibly Intune/Defender policy). It lives in the notification area and draws live mini graphs for CPU, memory, network throughput, and ping latency to 1.1.1.1. Clicking it opens a detail panel with per-core CPU, top processes, and history graphs. Budget: under 1% CPU and a small RAM footprint.
+Researched 2026-11-21. Target: a Rust app for Windows 11, including managed machines (Entra-joined, Intune/Defender policy). It lives in the notification area and draws live mini graphs for CPU, memory, network throughput, and ping latency to 1.1.1.1. Clicking it opens a detail panel with per-core CPU, top processes, and history graphs. Budget: under 1% CPU and a small RAM footprint.
 
 Versions come from the crates.io API (`https://crates.io/api/v1/crates/<name>`) on 2026-11-21. Numbered citations such as [S1] point to the Sources list at the end.
 

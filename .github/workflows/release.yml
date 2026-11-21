@@ -2,6 +2,11 @@ name: release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild and upload exes to
+        required: true
 
 permissions:
   contents: write
@@ -11,6 +16,7 @@ permissions:
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       created: ${{ steps.rp.outputs.release_created }}
@@ -30,6 +36,8 @@ jobs:
             arch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.sha }}
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.target }}
@@ -57,10 +65,13 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      # Attestations need a public repository on user-owned accounts.
+      - if: ${{ !github.event.repository.private }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: dist/*.exe
       - name: Rolling main-latest prerelease
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -70,7 +81,8 @@ jobs:
             --title "main (rolling)" --notes "Latest build of main. Unsigned; verify with: gh attestation verify <exe> -R ${{ github.repository }}"
           gh release edit main-latest --target "$GITHUB_SHA"
           gh release upload main-latest dist/*.exe --clobber
-      - if: needs.release-please.outputs.created == 'true'
+      - if: needs.release-please.outputs.created == 'true' || inputs.tag
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.release-please.outputs.tag }}" dist/*.exe --clobber
+          TAG: ${{ inputs.tag || needs.release-please.outputs.tag }}
+        run: gh release upload "$TAG" dist/*.exe --clobber

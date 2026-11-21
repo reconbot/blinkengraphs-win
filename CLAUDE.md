@@ -7,3 +7,5 @@ Skills (`mattpocock-skills`): `domain-modeling` when a term or decision changes,
 Comments carry only what code can't: the why, the Win32 gotcha, the source URL. Prose earns each sentence.
 
 Commits follow Conventional Commits; release-please builds the changelog from them.
+
+Commits, PRs and comments stay free of session links and personal or employer details; the repo is public.
