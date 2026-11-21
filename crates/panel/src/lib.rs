@@ -75,6 +75,16 @@ impl Range {
 pub struct Panel {
     pub tab: Tab,
     pub range: Range,
+    pub sort: ProcessSort,
+}
+
+/// Impact ranks by CPU and memory together, each as a share of the busiest process listed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ProcessSort {
+    #[default]
+    Impact,
+    Cpu,
+    Memory,
 }
 
 impl Default for Panel {
@@ -82,6 +92,7 @@ impl Default for Panel {
         Self {
             tab: Tab::Overview,
             range: Range::Min1,
+            sort: ProcessSort::Impact,
         }
     }
 }
@@ -140,7 +151,7 @@ impl Panel {
         }
     }
 
-    fn overview(&self, ui: &mut Ui, view: &View) {
+    fn overview(&mut self, ui: &mut Ui, view: &View) {
         let s = view.history.last_sample();
         for row in [
             [Section::Cpu, Section::Memory],
@@ -157,7 +168,7 @@ impl Panel {
             self.latency_card(ui, view, false)
         });
         ui.add_space(8.0);
-        processes(ui, view.processes);
+        processes(ui, view.processes, &mut self.sort);
     }
 
     fn section_card(&self, ui: &mut Ui, view: &View, section: Section, s: Option<&model::Sample>) {
@@ -377,7 +388,7 @@ fn cores(ui: &mut Ui, per_core: &[f32]) {
     }
 }
 
-fn processes(ui: &mut Ui, rows: &[ProcessRow]) {
+fn processes(ui: &mut Ui, rows: &[ProcessRow], sort: &mut ProcessSort) {
     egui::Frame::new()
         .fill(theme::CARD)
         .corner_radius(10.0)
@@ -389,39 +400,97 @@ fn processes(ui: &mut Ui, rows: &[ProcessRow]) {
                 ui.label(RichText::new("Sampling…").weak());
                 return;
             }
-            let cols = [
-                (0.0, "Process"),
-                (56.0, "CPU"),
-                (72.0, "Memory"),
-                (80.0, "Disk"),
-            ];
-            table_row(
-                ui,
-                &cols.map(|(w, h)| (w, RichText::new(h).small().weak())),
-                false,
-            );
-            for (i, r) in rows.iter().take(8).enumerate() {
-                let cells = [
-                    (0.0, RichText::new(&r.name)),
-                    (
-                        56.0,
-                        RichText::new(format!("{:.1}%", r.cpu_pct))
-                            .color(theme::level(Section::Cpu, r.cpu_pct / 100.0)),
-                    ),
-                    (72.0, RichText::new(bytes(r.memory_bytes as f64))),
-                    (80.0, RichText::new(format!("{}/s", bytes(r.disk_bps)))),
-                ];
-                table_row(ui, &cells, i % 2 == 1);
+            let max_cpu = rows.iter().map(|r| r.cpu_pct).fold(1.0, f32::max);
+            let max_mem = rows
+                .iter()
+                .map(|r| r.memory_bytes)
+                .max()
+                .unwrap_or(1)
+                .max(1) as f32;
+            let impact =
+                |r: &ProcessRow| (r.cpu_pct / max_cpu + r.memory_bytes as f32 / max_mem) / 2.0;
+            let mut sorted: Vec<&ProcessRow> = rows.iter().collect();
+            match sort {
+                ProcessSort::Impact => sorted.sort_by(|a, b| impact(b).total_cmp(&impact(a))),
+                ProcessSort::Cpu => sorted.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct)),
+                ProcessSort::Memory => sorted.sort_by_key(|r| std::cmp::Reverse(r.memory_bytes)),
+            }
+
+            let widths = [0.0, 52.0, 56.0, 72.0, 72.0];
+            table_cells(ui, &widths, false, |i, ui| {
+                let (label, key) = match i {
+                    0 => ("Process", None),
+                    1 => ("Impact", Some(ProcessSort::Impact)),
+                    2 => ("CPU", Some(ProcessSort::Cpu)),
+                    3 => ("Memory", Some(ProcessSort::Memory)),
+                    _ => ("Disk", None),
+                };
+                match key {
+                    Some(k) => {
+                        let active = *sort == k;
+                        let text = if active {
+                            format!("{label} ↓")
+                        } else {
+                            label.to_string()
+                        };
+                        let rt = RichText::new(text).small();
+                        let rt = if active {
+                            rt.color(theme::TEXT)
+                        } else {
+                            rt.weak()
+                        };
+                        if ui
+                            .add(egui::Button::new(rt).frame(false))
+                            .on_hover_text(format!("Sort by {label}"))
+                            .clicked()
+                        {
+                            *sort = k;
+                        }
+                    }
+                    None => {
+                        ui.label(RichText::new(label).small().weak());
+                    }
+                }
+            });
+            for (row, r) in sorted.into_iter().take(8).enumerate() {
+                let score = impact(r);
+                table_cells(ui, &widths, row % 2 == 1, |i, ui| match i {
+                    0 => {
+                        ui.add(egui::Label::new(RichText::new(&r.name)).truncate());
+                    }
+                    1 => impact_bar(ui, score),
+                    2 => {
+                        ui.label(
+                            RichText::new(format!("{:.1}%", r.cpu_pct))
+                                .color(theme::level(Section::Cpu, r.cpu_pct / 100.0)),
+                        );
+                    }
+                    3 => {
+                        ui.label(bytes(r.memory_bytes as f64));
+                    }
+                    _ => {
+                        ui.label(format!("{}/s", bytes(r.disk_bps)));
+                    }
+                });
             }
         });
 }
 
+fn impact_bar(ui: &mut Ui, score: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(44.0, 8.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 3.0, theme::faint());
+    let mut fill = rect;
+    fill.set_width(rect.width() * score.clamp(0.0, 1.0));
+    ui.painter()
+        .rect_filled(fill, 3.0, theme::level(Section::Cpu, score));
+}
+
 /// Fixed-width columns so values don't shift as rows change. Width 0 takes the remaining space,
-/// left-aligned and truncated; every other column is right-aligned.
-fn table_row(ui: &mut Ui, cells: &[(f32, RichText)], stripe: bool) {
-    let fixed: f32 = cells.iter().map(|(w, _)| w).sum();
+/// left-aligned; every other column is right-aligned.
+fn table_cells(ui: &mut Ui, widths: &[f32], stripe: bool, mut cell: impl FnMut(usize, &mut Ui)) {
+    let fixed: f32 = widths.iter().sum();
     let gap = 8.0;
-    let flex = (ui.available_width() - fixed - gap * cells.len() as f32).max(40.0);
+    let flex = (ui.available_width() - fixed - gap * widths.len() as f32).max(40.0);
     let fill = if stripe {
         theme::faint()
     } else {
@@ -434,7 +503,7 @@ fn table_row(ui: &mut Ui, cells: &[(f32, RichText)], stripe: bool) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                for (w, text) in cells {
+                for (i, w) in widths.iter().enumerate() {
                     let (width, layout) = if *w == 0.0 {
                         (flex, Layout::left_to_right(Align::Center))
                     } else {
@@ -442,11 +511,18 @@ fn table_row(ui: &mut Ui, cells: &[(f32, RichText)], stripe: bool) {
                     };
                     ui.allocate_ui_with_layout(vec2(width, 18.0), layout, |ui| {
                         ui.set_width(width);
-                        ui.add(egui::Label::new(text.clone()).truncate());
+                        cell(i, ui);
                     });
                 }
             });
         });
+}
+
+fn table_row(ui: &mut Ui, cells: &[(f32, RichText)], stripe: bool) {
+    let widths: Vec<f32> = cells.iter().map(|(w, _)| *w).collect();
+    table_cells(ui, &widths, stripe, |i, ui| {
+        ui.add(egui::Label::new(cells[i].1.clone()).truncate());
+    });
 }
 
 fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {

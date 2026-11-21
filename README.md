@@ -33,7 +33,7 @@ Tray Icons (actual size, then 4× zoom):
 
 ## Usage
 
-- Click any Meter, or press `Ctrl+Shift+Alt+M`, to open the Panel. Click away or press `Esc` to close it.
+- Click any Meter, or press `Ctrl+Alt+B`, to open the Panel. Click away or press `Esc` to close it.
 - Right-click a Meter for Open, Settings and Quit.
 - Settings live in `%APPDATA%\blinkengraphs\config.toml`; the Settings tab edits them live. History is stored in `history.db` in the same folder.
 - Windows 11 hides new tray icons in the overflow menu: drag them onto the taskbar, or switch Surface to **Taskbar Strip**.

@@ -134,7 +134,7 @@ impl Default for Config {
                     traces: vec![probe(Protocol::Icmp, CLOUDFLARE)],
                 },
             ],
-            hotkey: "Ctrl+Shift+Alt+M".into(),
+            hotkey: "Ctrl+Alt+B".into(),
             history: HistoryConfig::default(),
             pause_when_idle: true,
         }
@@ -158,6 +158,10 @@ impl Config {
 
     /// Restores Sections a hand-edited file dropped, so `section()` never panics.
     fn normalize(mut self) -> Self {
+        // v1.0 wrote its default to every config; move unchanged ones to the new default.
+        if self.hotkey == "Ctrl+Shift+Alt+M" {
+            self.hotkey = Config::default().hotkey;
+        }
         let defaults = Config::default();
         for d in defaults.sections {
             if !self.sections.iter().any(|c| c.section == d.section) {
