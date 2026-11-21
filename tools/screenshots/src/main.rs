@@ -29,6 +29,10 @@ fn main() {
         sheet(&s).save_png(out.join(&file)).unwrap();
         writeln!(index, "| {} | ![{}]({prefix}{file}) |", s.caption, s.name).unwrap();
     }
+    index.push_str("\n| Taskbar Strip | |\n|---|---|\n");
+    for (file, caption) in strips(&out) {
+        writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
+    }
     index.push_str("\n| Panel | |\n|---|---|\n");
     for (file, caption) in panels(&out) {
         writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
@@ -173,4 +177,38 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
         shots.push((file, format!("{tab:?} · {}", s.caption)));
     }
     shots
+}
+
+fn font_bytes() -> Option<Vec<u8>> {
+    [
+        r"C:\Windows\Fonts\segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    .iter()
+    .find_map(|p| fs::read(p).ok())
+}
+
+fn strips(out: &std::path::Path) -> Vec<(String, String)> {
+    let bytes = font_bytes();
+    let font = bytes
+        .as_deref()
+        .and_then(|b| render::FontRef::try_from_slice(b).ok());
+    let config = config::Config::default();
+    let scale = 1.5;
+    let height = (48.0 * scale) as u32;
+    fixtures::all()
+        .iter()
+        .map(|s| {
+            let mut h = history::History::open(None, 15, 7);
+            fixtures::populate(&mut h, s, NOW);
+            let strip = meters::strip(&h, &config, height, scale, font.as_ref());
+            let w = strip.width() + (220.0 * scale) as u32;
+            let mut bar = Pixmap::new(w, height).unwrap();
+            bar.fill(Color::from_rgba8(0x1c, 0x1c, 0x1c, 0xff));
+            blit(&mut bar, &strip, (40.0 * scale) as u32, 0, 1);
+            let file = format!("strip-{}.png", s.name);
+            bar.save_png(out.join(&file)).unwrap();
+            (file, s.caption.to_string())
+        })
+        .collect()
 }

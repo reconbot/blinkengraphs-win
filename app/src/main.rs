@@ -2,8 +2,8 @@
 
 #[cfg_attr(not(windows), allow(dead_code))]
 mod engine;
-#[cfg_attr(not(windows), allow(dead_code))]
-mod meters;
+#[cfg(windows)]
+mod strip;
 #[cfg(windows)]
 mod win;
 

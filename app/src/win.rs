@@ -1,8 +1,9 @@
 use crate::{
     engine::{Command, Engine},
-    meters,
+    strip::Strip,
 };
 use config::Config;
+use config::Surface;
 use eframe::egui::{self, ViewportCommand};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 use model::Section;
@@ -37,6 +38,7 @@ enum UiEvent {
     Tray(TrayIconEvent),
     Menu(MenuEvent),
     Hotkey(GlobalHotKeyEvent),
+    StripClick,
 }
 
 pub fn run() {
@@ -84,6 +86,9 @@ struct App {
     visible: bool,
     shown_at: Instant,
     px: u32,
+    strip: Strip,
+    strip_attached: bool,
+    font: Option<render::FontRef<'static>>,
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +119,8 @@ impl App {
         TrayIconEvent::set_event_handler(Some(move |e| f(UiEvent::Tray(e))));
         let f = forward(tx.clone(), ctx.clone());
         MenuEvent::set_event_handler(Some(move |e| f(UiEvent::Menu(e))));
+        let strip_click = forward(tx.clone(), ctx.clone());
+        let strip = Strip::new(move || strip_click(UiEvent::StripClick));
         let f = forward(tx, ctx.clone());
         GlobalHotKeyEvent::set_event_handler(Some(move |e| f(UiEvent::Hotkey(e))));
 
@@ -170,15 +177,24 @@ impl App {
             visible: false,
             shown_at: Instant::now(),
             px,
+            strip,
+            strip_attached: false,
+            font: system_font(),
         };
         app.apply_visibility();
         app.register_hotkey();
         app
     }
 
+    /// With the Strip attached only the Latency icon stays, as the Menu Icon.
     fn apply_visibility(&self) {
         for (s, icon) in &self.icons {
-            let _ = icon.set_visible(self.config.section(*s).visible);
+            let visible = if self.strip_attached {
+                *s == Section::Latency
+            } else {
+                self.config.section(*s).visible
+            };
+            let _ = icon.set_visible(visible);
         }
     }
 
@@ -202,9 +218,21 @@ impl App {
             return;
         }
         self.last_tick = s.tick;
+        let attached = self.config.surface == Surface::TaskbarStrip
+            && self.strip.geometry().is_some_and(|(scale, h)| {
+                let img = meters::strip(&s.history, &self.config, h, scale, self.font.as_ref());
+                self.strip.show(&img)
+            });
+        if !attached {
+            self.strip.destroy();
+        }
+        if attached != self.strip_attached {
+            self.strip_attached = attached;
+            self.apply_visibility();
+        }
         for (section, icon) in &self.icons {
             let c = self.config.section(*section);
-            if !c.visible {
+            if !c.visible || (attached && *section != Section::Latency) {
                 continue;
             }
             let img = meters::draw(*section, &s.history, &self.config, &c.meter, self.px);
@@ -304,6 +332,7 @@ impl eframe::App for App {
                     self.toggle(ctx, None)
                 }
                 UiEvent::Hotkey(_) => {}
+                UiEvent::StripClick => self.toggle(ctx, None),
             }
         }
         self.redraw_icons();
@@ -353,6 +382,11 @@ impl eframe::App for App {
             self.hide(ui.ctx());
         }
     }
+}
+
+fn system_font() -> Option<render::FontRef<'static>> {
+    let bytes = std::fs::read(r"C:\Windows\Fonts\segoeui.ttf").ok()?;
+    render::FontRef::try_from_slice(Box::leak(bytes.into_boxed_slice())).ok()
 }
 
 /// Locked sessions can't switch to the input desktop; that is the documented-by-folklore lock test.

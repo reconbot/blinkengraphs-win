@@ -1,0 +1,16 @@
+[package]
+name = "meters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+model.workspace = true
+render.workspace = true
+config.workspace = true
+history.workspace = true
+verdict.workspace = true
+
+[dev-dependencies]
+fixtures.workspace = true

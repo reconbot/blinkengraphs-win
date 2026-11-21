@@ -476,9 +476,10 @@ dependencies = [
  "collect",
  "config",
  "eframe",
- "fixtures",
+ "embed-manifest",
  "global-hotkey",
  "history",
+ "meters",
  "model",
  "panel",
  "probe",
@@ -1124,6 +1125,12 @@ checksum = "e73ce90f54750be8672c02be0743fe47530e6f251e066f0ee2869b59eb297af5"
 dependencies = [
  "bytemuck",
 ]
+
+[[package]]
+name = "embed-manifest"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba92c8f4591bf29f89716b45e5f5f56577adbb81426e5620c6e994da7c88bb7a"
 
 [[package]]
 name = "endi"
@@ -2390,6 +2397,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "meters"
+version = "0.1.0"
+dependencies = [
+ "config",
+ "fixtures",
+ "history",
+ "model",
+ "render",
+ "verdict",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2555,7 +2574,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.2",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3458,6 +3477,7 @@ dependencies = [
 name = "render"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "model",
  "tiny-skia",
 ]
@@ -3585,6 +3605,7 @@ dependencies = [
  "fixtures",
  "history",
  "image",
+ "meters",
  "model",
  "panel",
  "render",
