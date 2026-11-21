@@ -80,18 +80,27 @@ impl Engine {
     }
 }
 
+/// Each configured group runs as up to three Prober groups, one per collection, each on its own interval.
 pub fn groups(c: &Config) -> Vec<ProbeGroup> {
-    let mut gs: Vec<ProbeGroup> = c
-        .groups
-        .iter()
-        .filter(|g| g.enabled)
-        .map(|g| ProbeGroup {
-            name: g.name.clone(),
-            interval: Duration::from_millis(g.interval_ms.max(MIN_INTERVAL_MS)),
-            probes: g.probes.clone(),
-            traces: g.traces.clone(),
-        })
-        .collect();
+    let ms = |v: u64| Duration::from_millis(v.max(MIN_INTERVAL_MS));
+    let mut gs: Vec<ProbeGroup> = Vec::new();
+    for g in c.groups.iter().filter(|g| g.enabled) {
+        let parts = [
+            ("latency", g.latency_ms, g.latency_probes(), vec![]),
+            ("dns", g.dns_ms, g.dns_probes(), vec![]),
+            ("trace", g.trace_ms, vec![], g.traces()),
+        ];
+        for (kind, interval, probes, traces) in parts {
+            if !probes.is_empty() || !traces.is_empty() {
+                gs.push(ProbeGroup {
+                    name: format!("{} {kind}", g.name),
+                    interval: ms(interval),
+                    probes,
+                    traces,
+                });
+            }
+        }
+    }
     if !gs.iter().any(|g| g.probes.contains(&c.primary)) {
         gs.push(ProbeGroup {
             name: "Latency Meter".into(),

@@ -228,7 +228,7 @@ impl Ticker {
             for probe in &self.group.probes {
                 let addr = addrs[&probe.target];
                 let port = match probe.protocol {
-                    Protocol::Tcp(port) => port,
+                    Protocol::Tcp(port) | Protocol::Udp(port) => port,
                     Protocol::Dns => 53,
                     Protocol::Icmp => continue,
                 };
@@ -238,6 +238,7 @@ impl Ticker {
                         let sa = SocketAddr::new(ip, port);
                         match probe.protocol {
                             Protocol::Dns => net::dns(sa, timeout),
+                            Protocol::Udp(_) => net::udp(sa, timeout),
                             _ => net::tcp(sa, timeout),
                         }
                     });

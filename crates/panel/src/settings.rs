@@ -1,7 +1,7 @@
 use crate::{View, theme};
-use config::{Adapter, Config, ProbeGroup, Surface};
+use config::{Adapter, Config, ProbeGroup, Surface, TargetRow};
 use egui::{RichText, Ui};
-use model::{Metric, Probe, Protocol, Section, Target};
+use model::{Metric, Probe, Section, Target};
 
 /// Returns true when `config` changed.
 pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
@@ -81,7 +81,7 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
         let all: Vec<Probe> = config
             .groups
             .iter()
-            .flat_map(|g| g.probes.iter().cloned())
+            .flat_map(|g| g.latency_probes())
             .collect();
         egui::ComboBox::from_id_salt("primary")
             .selected_text(config.primary.to_string())
@@ -95,41 +95,22 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
 
     let mut remove_group = None;
     for (gi, g) in config.groups.iter_mut().enumerate() {
-        group(ui, &format!("Probe Group · {}", g.name), |ui| {
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut g.enabled, "Enabled");
-                interval(ui, "every", &mut g.interval_ms);
-                if ui.small_button("Remove group").clicked() {
-                    remove_group = Some(gi);
-                }
+        ui.push_id(("group", gi), |ui| {
+            group(ui, "Probe Group", |ui| {
+                probe_group(ui, g, &mut remove_group, gi)
             });
-            probe_list(
-                ui,
-                ("p", gi),
-                "Probes",
-                &mut g.probes,
-                &["icmp", "tcp:443", "tcp:80", "dns"],
-            );
-            probe_list(
-                ui,
-                ("t", gi),
-                "Hop Traces",
-                &mut g.traces,
-                &["icmp", "tcp:443"],
-            );
         });
     }
     if let Some(i) = remove_group {
         config.groups.remove(i);
     }
     if ui.button("Add Probe Group").clicked() {
-        config.groups.push(ProbeGroup {
-            name: format!("Group {}", config.groups.len() + 1),
-            enabled: true,
-            interval_ms: 1000,
-            probes: vec![],
-            traces: vec![],
-        });
+        let n = config.groups.len() + 1;
+        let mut row = TargetRow::new(Target::from("1.1.1.1".to_string()));
+        row.icmp = true;
+        config
+            .groups
+            .push(ProbeGroup::new(format!("Group {n}"), vec![row]));
     }
 
     *config != before
@@ -180,50 +161,83 @@ fn interval(ui: &mut Ui, label: &str, ms: &mut u64) {
     });
 }
 
-fn probe_list(
-    ui: &mut Ui,
-    id: (&str, usize),
-    title: &str,
-    probes: &mut Vec<Probe>,
-    protocols: &[&str],
-) {
-    ui.label(RichText::new(title).small().weak());
+const WIDTHS: [f32; 7] = [0.0, 40.0, 96.0, 96.0, 40.0, 44.0, 22.0];
+
+/// UDP probes default to the traceroute port: almost always closed, so the host answers with
+/// port-unreachable and the round trip is measurable.
+const UDP_DEFAULT: u16 = 33434;
+
+fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>, gi: usize) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut g.name).desired_width(160.0));
+        ui.checkbox(&mut g.enabled, "Enabled");
+        if ui.small_button("Remove group").clicked() {
+            *remove_group = Some(gi);
+        }
+    });
+    ui.horizontal(|ui| {
+        interval(ui, "Latency every", &mut g.latency_ms);
+        interval(ui, "DNS", &mut g.dns_ms);
+        interval(ui, "Trace", &mut g.trace_ms);
+    });
+    ui.add_space(4.0);
+    crate::table_cells(ui, &WIDTHS, false, |i, ui| {
+        let h = ["Target", "ICMP", "TCP port", "UDP port", "DNS", "Trace", ""][i];
+        ui.label(RichText::new(h).small().weak());
+    });
     let mut remove = None;
-    for (i, p) in probes.iter_mut().enumerate() {
-        ui.push_id((id, i), |ui| {
-            ui.horizontal(|ui| {
-                let mut proto = p.protocol.to_string();
-                egui::ComboBox::from_id_salt("proto")
-                    .width(70.0)
-                    .selected_text(&proto)
-                    .show_ui(ui, |ui| {
-                        for o in protocols {
-                            ui.selectable_value(&mut proto, o.to_string(), *o);
-                        }
-                    });
-                if let Ok(np) = Protocol::try_from(proto) {
-                    p.protocol = np;
+    for (ri, row) in g.targets.iter_mut().enumerate() {
+        ui.push_id(ri, |ui| {
+            let traceable = !matches!(row.target, Target::Gateway | Target::SystemResolver);
+            crate::table_cells(ui, &WIDTHS, ri % 2 == 1, |i, ui| match i {
+                0 => {
+                    let mut text = row.target.to_string();
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY))
+                        .changed()
+                    {
+                        row.target = Target::from(text);
+                    }
                 }
-                let mut target = p.target.to_string();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut target).desired_width(150.0))
-                    .changed()
-                {
-                    p.target = Target::from(target);
+                1 => {
+                    ui.checkbox(&mut row.icmp, "");
                 }
-                if ui.small_button("Remove").clicked() {
-                    remove = Some(i);
+                2 => port(ui, &mut row.tcp, 443),
+                3 => port(ui, &mut row.udp, UDP_DEFAULT),
+                4 => {
+                    ui.checkbox(&mut row.dns, "");
+                }
+                5 => {
+                    ui.add_enabled(traceable, egui::Checkbox::without_text(&mut row.trace))
+                        .on_disabled_hover_text("Hop traces need an internet target");
+                }
+                _ => {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Remove target")
+                        .clicked()
+                    {
+                        remove = Some(ri);
+                    }
                 }
             });
         });
     }
     if let Some(i) = remove {
-        probes.remove(i);
+        g.targets.remove(i);
     }
-    if ui.small_button("+ Add").clicked() {
-        probes.push(Probe {
-            target: Target::from("1.1.1.1".to_string()),
-            protocol: Protocol::Icmp,
-        });
+    if ui.small_button("+ Add target").clicked() {
+        let mut row = TargetRow::new(Target::from("example.com".to_string()));
+        row.icmp = true;
+        g.targets.push(row);
     }
+}
+
+/// Checkbox plus port: unchecked stores `None`, so the column round-trips through TOML as absent.
+fn port(ui: &mut Ui, value: &mut Option<u16>, default: u16) {
+    let mut on = value.is_some();
+    let mut p = value.unwrap_or(default);
+    ui.add_enabled(on, egui::DragValue::new(&mut p).range(1..=65535));
+    ui.checkbox(&mut on, "");
+    *value = on.then_some(p);
 }

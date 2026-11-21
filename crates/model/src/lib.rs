@@ -169,6 +169,8 @@ impl std::fmt::Display for Target {
 pub enum Protocol {
     Icmp,
     Tcp(u16),
+    /// A datagram to a port; a reply or an ICMP port-unreachable both prove the host answered.
+    Udp(u16),
     /// UDP DNS query on port 53.
     Dns,
 }
@@ -178,6 +180,7 @@ impl std::fmt::Display for Protocol {
         match self {
             Protocol::Icmp => f.write_str("icmp"),
             Protocol::Tcp(p) => write!(f, "tcp:{p}"),
+            Protocol::Udp(p) => write!(f, "udp:{p}"),
             Protocol::Dns => f.write_str("dns"),
         }
     }
