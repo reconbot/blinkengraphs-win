@@ -50,6 +50,11 @@ Tray Icons (actual size, then 4× zoom):
 - [x] **M2: Taskbar Strip and History.**
   - Strip docked in the taskbar, falling back to Tray Icons
   - 7 days of one-minute Rollups in SQLite, browsable in the Panel's history ranges
+- [ ] **Near term.**
+  - Tray icons and Strip cells: check whether each says what it shows; add a text label if not
+  - Themes, and a color per Probe
+  - Per displayed Probe: time window and aggregate (p99, p95, p50, avg, max)
+  - Graph aggregate for all graphs (same choices)
 - [ ] **M3: Elevated Extras and distribution.** Per-process network bytes and UDP hop traces when elevated; autostart; SignPath signing; installer
 
 ## Docs
