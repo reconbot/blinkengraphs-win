@@ -59,7 +59,7 @@ pub struct NetRates {
     pub errors: f64,
 }
 
-/// Rates for the Followed Adapter; the first reading after the adapter changes is zero.
+/// Rates for the Followed Adapter; the first Sample after the adapter changes is zero.
 #[derive(Default)]
 pub struct NetTracker {
     last: Option<(u64, NetCounters)>,
@@ -85,7 +85,7 @@ impl NetTracker {
     }
 }
 
-pub struct ProcReading {
+pub struct ProcCounters {
     pub pid: u32,
     /// Distinguishes a reused pid.
     pub created: i64,
@@ -106,7 +106,7 @@ impl ProcTracker {
     /// `system_time` is CPU time of all processors including idle, 100 ns units, so CPU% matches Task Manager.
     pub fn update(
         &mut self,
-        readings: Vec<ProcReading>,
+        counters: Vec<ProcCounters>,
         system_time: u64,
         secs: f64,
         limit: usize,
@@ -115,8 +115,8 @@ impl ProcTracker {
             .prev_system
             .map_or(0, |p| counter_delta(p, system_time));
         self.prev_system = Some(system_time);
-        let mut next = HashMap::with_capacity(readings.len());
-        let mut rows: Vec<ProcessRow> = readings
+        let mut next = HashMap::with_capacity(counters.len());
+        let mut rows: Vec<ProcessRow> = counters
             .into_iter()
             .map(|r| {
                 let key = (r.pid, r.created);
@@ -245,8 +245,8 @@ mod tests {
         cpu_time: u64,
         io_bytes: u64,
         memory_bytes: u64,
-    ) -> ProcReading {
-        ProcReading {
+    ) -> ProcCounters {
+        ProcCounters {
             pid,
             created,
             name: format!("p{pid}"),

@@ -119,24 +119,7 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
             .unwrap();
         let mut h = history::History::open(None, 15, 7);
         fixtures::populate(&mut h, &s, NOW);
-        let probes: Vec<_> = h
-            .probes()
-            .into_iter()
-            .map(|p| {
-                let st = h.stat(&p, 30);
-                (p, st)
-            })
-            .collect();
-        let peak = h
-            .recent(&history::Key::Metric(model::Metric::NetUp), 900)
-            .into_iter()
-            .flatten()
-            .fold(0.0f32, f32::max) as f64;
-        let findings = verdict::diagnose(&verdict::Input {
-            sample: h.last_sample(),
-            probes: &probes,
-            upload_peak_bps: peak,
-        });
+        let findings = verdict::from_history(&h);
         let processes = fixtures::processes();
         let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
         let mut config = config::Config::default();

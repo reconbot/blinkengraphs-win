@@ -45,6 +45,8 @@ pub struct Hop {
 }
 
 const HOP_WINDOW: usize = 60;
+/// The window "now" means for loss, RTT and the Verdict.
+pub const RECENT_SECS: u64 = 30;
 
 #[derive(Default)]
 struct HopTrack {

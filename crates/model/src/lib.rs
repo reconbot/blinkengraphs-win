@@ -150,7 +150,7 @@ pub enum Target {
     Gateway,
     SystemResolver,
     Addr(IpAddr),
-    Host(String),
+    Name(String),
 }
 
 impl std::fmt::Display for Target {
@@ -159,7 +159,7 @@ impl std::fmt::Display for Target {
             Target::Gateway => f.write_str("gateway"),
             Target::SystemResolver => f.write_str("system-dns"),
             Target::Addr(a) => write!(f, "{a}"),
-            Target::Host(h) => f.write_str(h),
+            Target::Name(h) => f.write_str(h),
         }
     }
 }
@@ -194,7 +194,7 @@ impl From<String> for Target {
         match s.as_str() {
             "gateway" => Target::Gateway,
             "system-dns" => Target::SystemResolver,
-            _ => s.parse().map(Target::Addr).unwrap_or(Target::Host(s)),
+            _ => s.parse().map(Target::Addr).unwrap_or(Target::Name(s)),
         }
     }
 }

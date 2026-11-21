@@ -54,8 +54,12 @@ _Avoid_: node, router
 
 ### Explaining
 
+**Finding**:
+One rule-based conclusion: a Fault Domain, a severity, and a one-line headline.
+_Avoid_: alert, issue, problem
+
 **Verdict**:
-A plain-language conclusion about the current Fault Domain, such as "Gateway OK, 1.1.1.1 losing 12% → ISP problem", derived only from rules.
+The current Findings, most severe first; the top one is the headline, such as "Gateway OK, 1.1.1.1 losing 12% → ISP problem".
 _Avoid_: diagnosis, alert, insight
 
 **Fault Domain**:

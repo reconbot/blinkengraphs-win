@@ -7,3 +7,4 @@ publish = false
 
 [dependencies]
 model.workspace = true
+history.workspace = true

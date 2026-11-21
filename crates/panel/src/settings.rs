@@ -103,15 +103,20 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
                     remove_group = Some(gi);
                 }
             });
-            probe_list(ui, ("p", gi), "Probes", &mut g.probes);
-            probe_list(ui, ("t", gi), "Hop Traces", &mut g.traces);
-            if view.elevated {
-                ui.label(
-                    RichText::new("Running elevated: UDP traces available")
-                        .small()
-                        .weak(),
-                );
-            }
+            probe_list(
+                ui,
+                ("p", gi),
+                "Probes",
+                &mut g.probes,
+                &["icmp", "tcp:443", "tcp:80", "dns"],
+            );
+            probe_list(
+                ui,
+                ("t", gi),
+                "Hop Traces",
+                &mut g.traces,
+                &["icmp", "tcp:443"],
+            );
         });
     }
     if let Some(i) = remove_group {
@@ -150,6 +155,7 @@ fn toggle(ui: &mut Ui, list: &mut Vec<Metric>, m: Metric) {
     if ui.checkbox(&mut on, "").changed() {
         if on {
             list.push(m);
+            list.sort_by_key(|x| Metric::ALL.iter().position(|y| y == x));
         } else {
             list.retain(|x| *x != m);
         }
@@ -174,7 +180,13 @@ fn interval(ui: &mut Ui, label: &str, ms: &mut u64) {
     });
 }
 
-fn probe_list(ui: &mut Ui, id: (&str, usize), title: &str, probes: &mut Vec<Probe>) {
+fn probe_list(
+    ui: &mut Ui,
+    id: (&str, usize),
+    title: &str,
+    probes: &mut Vec<Probe>,
+    protocols: &[&str],
+) {
     ui.label(RichText::new(title).small().weak());
     let mut remove = None;
     for (i, p) in probes.iter_mut().enumerate() {
@@ -185,8 +197,8 @@ fn probe_list(ui: &mut Ui, id: (&str, usize), title: &str, probes: &mut Vec<Prob
                     .width(70.0)
                     .selected_text(&proto)
                     .show_ui(ui, |ui| {
-                        for o in ["icmp", "tcp:443", "tcp:80", "dns"] {
-                            ui.selectable_value(&mut proto, o.to_string(), o);
+                        for o in protocols {
+                            ui.selectable_value(&mut proto, o.to_string(), *o);
                         }
                     });
                 if let Ok(np) = Protocol::try_from(proto) {

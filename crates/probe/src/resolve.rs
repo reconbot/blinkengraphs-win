@@ -41,7 +41,7 @@ impl Resolver {
 fn lookup(target: &Target) -> Option<IpAddr> {
     match target {
         Target::Addr(a) => Some(*a),
-        Target::Host(name) => {
+        Target::Name(name) => {
             let addrs: Vec<IpAddr> = (name.as_str(), 0)
                 .to_socket_addrs()
                 .ok()?
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn reports_first_answer_then_only_changes() {
         let r = Resolver::default();
-        let host = Target::Host("localhost".into());
+        let host = Target::Name("localhost".into());
         let mut seen = vec![];
         let first = r.resolve(&host, |a| seen.push(a));
         assert!(first.is_some_and(|a| a.is_loopback()));

@@ -267,7 +267,7 @@ fn icmp_error_source(raw: SOCKET) -> Option<IpAddr> {
     sockaddr_inet(&info.srcaddress).filter(|a| !a.is_unspecified())
 }
 
-/// Unverified technique (ADR 0002); a hop whose ICMP error carries no source reports `addr: None`.
+/// Unverified technique (ADR 0006); a hop whose ICMP error carries no source reports `addr: None`.
 pub fn tcp_trace(ip: Ipv4Addr, port: u16, max_ttl: u8, timeout: Duration) -> Vec<Hop> {
     let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
     thread::scope(|s| {

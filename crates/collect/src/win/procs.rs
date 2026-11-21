@@ -1,4 +1,4 @@
-use crate::calc::{ProcReading, ProcTracker};
+use crate::calc::{ProcCounters, ProcTracker};
 use model::ProcessRow;
 use std::mem::offset_of;
 use std::time::Instant;
@@ -62,8 +62,8 @@ impl Snapshotter {
         if !self.query() {
             return Vec::new();
         }
-        let readings = self.readings();
-        self.tracker.update(readings, system_time, secs, limit)
+        let counters = self.counters();
+        self.tracker.update(counters, system_time, secs, limit)
     }
 
     fn query(&mut self) -> bool {
@@ -93,7 +93,7 @@ impl Snapshotter {
         false
     }
 
-    fn readings(&self) -> Vec<ProcReading> {
+    fn counters(&self) -> Vec<ProcCounters> {
         let base = self.buf.as_ptr().cast::<u8>();
         let len = self.buf.len() * 8;
         let mut out = Vec::with_capacity(512);
@@ -103,7 +103,7 @@ impl Snapshotter {
             let pid = p.unique_process_id as usize as u32;
             // pid 0 is the Idle process: its CPU time is idle time.
             if pid != 0 {
-                out.push(ProcReading {
+                out.push(ProcCounters {
                     pid,
                     created: p.create_time,
                     name: image_name(&p.image_name),

@@ -234,7 +234,7 @@ impl Panel {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(p) = probes.first() {
-                    let st = view.history.stat(p, 30);
+                    let st = view.history.stat(p, history::RECENT_SECS);
                     let rtt = st
                         .rtt_ms
                         .map(|r| format!("{r:.0} ms"))
@@ -262,7 +262,7 @@ impl Panel {
         multiplot(ui, "latency", &names, if all { 180.0 } else { 110.0 });
         ui.horizontal_wrapped(|ui| {
             for (i, p) in probes.iter().enumerate() {
-                let st = view.history.stat(p, 30);
+                let st = view.history.stat(p, history::RECENT_SECS);
                 let text = format!(
                     "{p}  {}  {:.0}%{}",
                     st.rtt_ms
@@ -410,7 +410,7 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
         .striped(true)
         .spacing([12.0, 3.0])
         .show(ui, |ui| {
-            for c in ["#", "Host", "Loss", "Last", "Avg", "Best", "Worst"] {
+            for c in ["#", "Address", "Loss", "Last", "Avg", "Best", "Worst"] {
                 ui.label(RichText::new(c).small().weak());
             }
             ui.end_row();

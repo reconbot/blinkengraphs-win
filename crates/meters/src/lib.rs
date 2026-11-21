@@ -9,7 +9,10 @@ pub fn draw(section: Section, h: &History, config: &Config, metrics: &[Metric], 
     match section {
         Section::Latency => {
             let raw = h.recent(&Key::Probe(config.primary.clone()), n);
-            let baseline = h.stat(&config.primary, 30).baseline_ms.unwrap_or(20.0);
+            let baseline = h
+                .stat(&config.primary, history::RECENT_SECS)
+                .baseline_ms
+                .unwrap_or(20.0);
             let scale = (baseline * 4.0).max(100.0);
             let v: Vec<Option<f32>> = raw
                 .into_iter()
@@ -80,7 +83,7 @@ pub fn strip(
         let get = |m| s.map(|s| s.get(m)).unwrap_or(0.0);
         let (value, a, b, l) = match section {
             Section::Latency => {
-                let st = h.stat(&config.primary, 30);
+                let st = h.stat(&config.primary, history::RECENT_SECS);
                 let raw = h.recent(&Key::Probe(config.primary.clone()), n);
                 let scale = (st.baseline_ms.unwrap_or(20.0) * 4.0).max(100.0);
                 let v = raw
@@ -176,7 +179,7 @@ pub fn tooltip(
             get(Metric::DiskResponse)
         ),
         Section::Latency => {
-            let st = h.stat(&config.primary, 30);
+            let st = h.stat(&config.primary, history::RECENT_SECS);
             let rtt = st
                 .rtt_ms
                 .map(|r| format!("{r:.0} ms"))

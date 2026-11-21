@@ -38,6 +38,28 @@ const LOSS_WARN: f32 = 0.05;
 const LOSS_DOWN: f32 = 0.5;
 const INFLATED: f32 = 3.0;
 
+/// Findings for the current state of `h`: recent Probe stats, last Sample, upload peak over RAM.
+pub fn from_history(h: &history::History) -> Vec<Finding> {
+    let probes: Vec<(Probe, ProbeStat)> = h
+        .probes()
+        .into_iter()
+        .map(|p| {
+            let st = h.stat(&p, history::RECENT_SECS);
+            (p, st)
+        })
+        .collect();
+    let peak = h
+        .recent(&history::Key::Metric(Metric::NetUp), usize::MAX)
+        .into_iter()
+        .flatten()
+        .fold(0.0f32, f32::max) as f64;
+    diagnose(&Input {
+        sample: h.last_sample(),
+        probes: &probes,
+        upload_peak_bps: peak,
+    })
+}
+
 /// Most severe first; never empty.
 pub fn diagnose(input: &Input) -> Vec<Finding> {
     let mut out = network(input);

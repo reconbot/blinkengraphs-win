@@ -82,7 +82,7 @@ struct App {
     events: mpsc::Receiver<UiEvent>,
     hotkeys: Option<GlobalHotKeyManager>,
     hotkey: Option<HotKey>,
-    last_tick: u64,
+    drawn_samples: u64,
     visible: bool,
     shown_at: Instant,
     px: u32,
@@ -90,6 +90,7 @@ struct App {
     strip_attached: bool,
     font: Option<render::FontRef<'static>>,
     styled: bool,
+    elevated: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -127,6 +128,7 @@ impl App {
 
         let db = config::dir().join("history.db");
         let wake_ctx = ctx.clone();
+        watch_display();
         let engine = Engine::start(
             config.clone(),
             Some(db),
@@ -174,7 +176,7 @@ impl App {
             events,
             hotkeys: GlobalHotKeyManager::new().ok(),
             hotkey: None,
-            last_tick: u64::MAX,
+            drawn_samples: u64::MAX,
             visible: false,
             shown_at: Instant::now(),
             px,
@@ -182,6 +184,7 @@ impl App {
             strip_attached: false,
             font: system_font(),
             styled: false,
+            elevated: elevated(),
         };
         app.apply_visibility();
         app.register_hotkey();
@@ -216,10 +219,10 @@ impl App {
 
     fn redraw_icons(&mut self) {
         let s = self.engine.shared.lock().unwrap();
-        if s.tick == self.last_tick {
+        if s.sample_count == self.drawn_samples {
             return;
         }
-        self.last_tick = s.tick;
+        self.drawn_samples = s.sample_count;
         let attached = self.config.surface == Surface::TaskbarStrip
             && self.strip.geometry().is_some_and(|(scale, h)| {
                 let img = meters::strip(&s.history, &self.config, h, scale, self.font.as_ref());
@@ -234,7 +237,12 @@ impl App {
         }
         for (section, icon) in &self.icons {
             let c = self.config.section(*section);
-            if !c.visible || (attached && *section != Section::Latency) {
+            let shown = if attached {
+                *section == Section::Latency
+            } else {
+                c.visible
+            };
+            if !shown {
                 continue;
             }
             let img = meters::draw(*section, &s.history, &self.config, &c.meter, self.px);
@@ -363,7 +371,7 @@ impl eframe::App for App {
             processes: &s.processes,
             adapters: &s.adapters,
             now: model::now(),
-            elevated: false,
+            elevated: self.elevated,
             config_error: self.error.as_deref(),
         };
         let actions = self.panel.show(ui, &view, &mut self.config);
@@ -378,7 +386,7 @@ impl eframe::App for App {
                         .send(Command::Reconfigure(Box::new(self.config.clone())));
                     self.apply_visibility();
                     self.register_hotkey();
-                    self.last_tick = u64::MAX;
+                    self.drawn_samples = u64::MAX;
                 }
                 Action::Quit => self.quit(),
             }
@@ -415,8 +423,69 @@ fn system_font() -> Option<render::FontRef<'static>> {
     render::FontRef::try_from_slice(Box::leak(bytes.into_boxed_slice())).ok()
 }
 
-/// Locked sessions can't switch to the input desktop; that is the documented-by-folklore lock test.
+static DISPLAY_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// GUID_CONSOLE_DISPLAY_STATE: 0 off, 1 on, 2 dimmed.
+/// https://learn.microsoft.com/windows/win32/power/power-setting-guids
+fn watch_display() {
+    use windows_sys::Win32::System::{Power::*, SystemServices::GUID_CONSOLE_DISPLAY_STATE};
+    unsafe extern "system" fn on_change(
+        _: *const core::ffi::c_void,
+        _: u32,
+        setting: *const core::ffi::c_void,
+    ) -> u32 {
+        let s = unsafe { &*(setting as *const POWERBROADCAST_SETTING) };
+        if s.DataLength >= 4 {
+            DISPLAY_OFF.store(s.Data[0] == 0, Ordering::Relaxed);
+        }
+        0
+    }
+    // Leaked: Windows may read the parameters for the life of the registration.
+    let params = Box::leak(Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+        Callback: Some(on_change),
+        Context: std::ptr::null_mut(),
+    }));
+    let mut handle = std::ptr::null_mut();
+    unsafe {
+        PowerSettingRegisterNotification(
+            &GUID_CONSOLE_DISPLAY_STATE,
+            windows_sys::Win32::UI::WindowsAndMessaging::DEVICE_NOTIFY_CALLBACK,
+            (params as *mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS).cast(),
+            &mut handle,
+        );
+    }
+}
+
+fn elevated() -> bool {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut len = 0;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            (&mut e as *mut TOKEN_ELEVATION).cast(),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        ok != 0 && e.TokenIsElevated != 0
+    }
+}
+
+/// A locked session can't switch to the input desktop, so `SwitchDesktop` failing means locked.
 fn idle() -> bool {
+    if DISPLAY_OFF.load(Ordering::Relaxed) {
+        return true;
+    }
     unsafe {
         let mut saver = 0i32;
         SystemParametersInfoW(

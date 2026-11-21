@@ -49,6 +49,17 @@ Budget: under 1% CPU and about 30 MB RAM when idle with the Panel closed. These 
 | System | All Section Metrics | 1 s |
 | Process Snapshot | Top processes per Section, only while the Panel is open | 1 s |
 
+### Decisions from the M1 review
+
+- A Meter graphs the first enabled Metric in its Section (Network graphs download and upload together). Metrics are kept in catalog order, so ticking order doesn't change which one is drawn.
+- The Latency Meter always shows RTT and loss for the primary Probe. Jitter and the per-Probe lines are Panel-only, so the Latency Section has no Metric toggles.
+- Memory "compressed" is dropped: it has no cheap counter without admin.
+- Gateway Probes are ICMP only, because home routers rarely accept TCP 443.
+- Hop rows are kept in RAM only; history ranges apply to Probes and Metrics.
+- The Panel uses a rounded dark Win11 frame. A Mica backdrop is deferred, because a failed backdrop on a transparent window would leave the window invisible.
+- Pause triggers: session locked, screen saver running, or display off (`GUID_CONSOLE_DISPLAY_STATE`).
+- The Gateway and system resolver follow the default route even when the Network adapter is pinned.
+
 ## Architecture
 
 Platform-neutral crates build, test and render on Linux; only `collect`, `probe` and `app` call Win32 (behind `cfg(windows)` with Linux stubs).

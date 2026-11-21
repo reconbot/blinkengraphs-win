@@ -1,7 +1,7 @@
 use collect::{AdapterChoice, Collector};
 use config::{Adapter, Config};
-use history::{History, Key};
-use model::{Metric, ProbeStat, ProcessRow};
+use history::History;
+use model::ProcessRow;
 use probe::{Event, ProbeGroup, Prober};
 use std::{
     path::PathBuf,
@@ -15,14 +15,17 @@ use std::{
 };
 use verdict::Finding;
 
+/// Faster than this starves the UI thread for no visible gain.
+const MIN_INTERVAL_MS: u64 = 250;
+
 pub struct Shared {
     pub history: History,
     pub findings: Vec<Finding>,
     pub processes: Vec<ProcessRow>,
     pub adapters: Vec<String>,
     pub paused: bool,
-    /// Bumped on every new Sample so Surfaces redraw once per tick.
-    pub tick: u64,
+    /// Bumped on every new Sample so Surfaces redraw once per Sample.
+    pub sample_count: u64,
 }
 
 pub enum Command {
@@ -35,7 +38,7 @@ pub struct Engine {
     commands: Sender<Command>,
 }
 
-/// Decides whether sampling should pause (session locked, screen saver); `None` when unsupported.
+/// True while sampling should pause (session locked, display off, screen saver).
 pub type IdleCheck = Box<dyn Fn() -> bool + Send>;
 
 impl Engine {
@@ -56,7 +59,7 @@ impl Engine {
             processes: vec![],
             adapters: vec![],
             paused: false,
-            tick: 0,
+            sample_count: 0,
         }));
         let panel_open = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
@@ -84,7 +87,7 @@ pub fn groups(c: &Config) -> Vec<ProbeGroup> {
         .filter(|g| g.enabled)
         .map(|g| ProbeGroup {
             name: g.name.clone(),
-            interval: Duration::from_millis(g.interval_ms.max(250)),
+            interval: Duration::from_millis(g.interval_ms.max(MIN_INTERVAL_MS)),
             probes: g.probes.clone(),
             traces: g.traces.clone(),
         })
@@ -157,7 +160,7 @@ fn run(
         if now < next_sample {
             continue;
         }
-        next_sample = now + Duration::from_millis(config.system_interval_ms.max(250));
+        next_sample = now + Duration::from_millis(config.system_interval_ms.max(MIN_INTERVAL_MS));
 
         let should_pause = config.pause_when_idle && idle();
         if should_pause != paused {
@@ -177,7 +180,8 @@ fn run(
         sample.at = model::now();
         let panel = panel_open.load(Ordering::Relaxed);
         let procs = (panel && now >= next_procs).then(|| {
-            next_procs = now + Duration::from_millis(config.process_interval_ms.max(250));
+            next_procs =
+                now + Duration::from_millis(config.process_interval_ms.max(MIN_INTERVAL_MS));
             col.processes(10)
         });
         let adapters = (now >= next_adapters).then(|| {
@@ -196,30 +200,9 @@ fn run(
         if let Some(a) = adapters {
             s.adapters = a;
         }
-        s.findings = diagnose(&s.history);
-        s.tick += 1;
+        s.findings = verdict::from_history(&s.history);
+        s.sample_count += 1;
         drop(s);
         wake();
     }
-}
-
-pub fn diagnose(h: &History) -> Vec<Finding> {
-    let probes: Vec<(model::Probe, ProbeStat)> = h
-        .probes()
-        .into_iter()
-        .map(|p| {
-            let st = h.stat(&p, 30);
-            (p, st)
-        })
-        .collect();
-    let peak = h
-        .recent(&Key::Metric(Metric::NetUp), 900)
-        .into_iter()
-        .flatten()
-        .fold(0.0f32, f32::max) as f64;
-    verdict::diagnose(&verdict::Input {
-        sample: h.last_sample(),
-        probes: &probes,
-        upload_peak_bps: peak,
-    })
 }

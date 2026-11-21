@@ -88,13 +88,13 @@ fn reconfigure_swaps_probes() {
 #[test]
 fn host_resolution_is_reported() {
     let probe = Probe {
-        target: Target::Host("localhost".into()),
+        target: Target::Name("localhost".into()),
         protocol: Protocol::Tcp(1),
     };
     let (_prober, rx) = Prober::start(vec![group(vec![probe], vec![])]);
     match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
         Event::Resolved { target, addr } => {
-            assert_eq!(target, Target::Host("localhost".into()));
+            assert_eq!(target, Target::Name("localhost".into()));
             assert!(addr.is_some_and(|a| a.is_loopback()));
         }
         e => panic!("expected Resolved first, got {e:?}"),

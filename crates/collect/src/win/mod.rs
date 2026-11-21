@@ -25,7 +25,7 @@ impl Collector {
             last_sample: Instant::now(),
             procs: procs::Snapshotter::default(),
         };
-        // PDH rate counters and network deltas need a previous reading, so the caller's first sample has one.
+        // PDH rate counters and network deltas need a previous Sample, so the caller's first sample has one.
         c.sample();
         Ok(c)
     }

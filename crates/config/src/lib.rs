@@ -241,7 +241,7 @@ mod tests {
     fn hostname_target() {
         let c = Config::parse("[primary]\ntarget = \"vpn.example.com\"\nprotocol = \"tcp:443\"")
             .unwrap();
-        assert_eq!(c.primary.target, Target::Host("vpn.example.com".into()));
+        assert_eq!(c.primary.target, Target::Name("vpn.example.com".into()));
     }
 
     #[test]
