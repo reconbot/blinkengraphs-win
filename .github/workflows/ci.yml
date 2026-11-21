@@ -1,0 +1,109 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+      - run: cargo test
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo test --target ${{ matrix.target }}
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        name: tcp-hop spike
+        shell: bash
+        run: |
+          {
+            echo "## tcp-hop spike (ADR 0002)"
+            ./target/${{ matrix.target }}/release/tcp-hop.exe 1.1.1.1 443 15
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: cargo run --release -p screenshots -- out
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v7
+        with:
+          name: screenshots
+          path: out/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: blinkengraphs-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/blinkengraphs.exe
+            target/${{ matrix.target }}/release/tcp-hop.exe
+
+  screenshots:
+    needs: windows
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: screenshots
+          path: out
+      - name: Push to ci-screenshots branch
+        id: push
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          git init -q pub && cd pub
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
+          git fetch -q --depth 1 origin ci-screenshots && git checkout -q FETCH_HEAD || git checkout -q --orphan ci-screenshots
+          mkdir -p "$SHA" && cp ../out/*.png "$SHA/"
+          git add "$SHA"
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -qm "screenshots $SHA"
+          git push -q origin HEAD:ci-screenshots
+          prefix="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/$SHA/"
+          sed "s#](\([^)]*\.png\))#](${prefix}\1)#" ../out/index.md > ../index.md
+          { echo "## Screenshots"; cat ../index.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const marker = '<!-- blinkengraphs-screenshots -->';
+            const body = `${marker}\n## Screenshots (${context.payload.pull_request.head.sha.slice(0, 7)})\n\n` +
+              require('fs').readFileSync('index.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
