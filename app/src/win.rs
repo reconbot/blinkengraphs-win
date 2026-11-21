@@ -89,6 +89,7 @@ struct App {
     strip: Strip,
     strip_attached: bool,
     font: Option<render::FontRef<'static>>,
+    styled: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -180,6 +181,7 @@ impl App {
             strip,
             strip_attached: false,
             font: system_font(),
+            styled: false,
         };
         app.apply_visibility();
         app.register_hotkey();
@@ -305,6 +307,9 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.styled {
+            self.styled = style_window();
+        }
         while let Ok(e) = self.events.try_recv() {
             match e {
                 UiEvent::Tray(TrayIconEvent::Click {
@@ -382,6 +387,27 @@ impl eframe::App for App {
             self.hide(ui.ctx());
         }
     }
+}
+
+/// Win11 rounded corners, dark frame and a hairline border on the borderless Panel window.
+fn style_window() -> bool {
+    use windows_sys::Win32::Graphics::Dwm::*;
+    unsafe {
+        let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW(
+            std::ptr::null(),
+            windows_sys::core::w!("blinkengraphs"),
+        );
+        if hwnd.is_null() {
+            return false;
+        }
+        let set = |attr: i32, v: u32| {
+            DwmSetWindowAttribute(hwnd, attr as u32, (&v as *const u32).cast(), 4)
+        };
+        set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND as u32);
+        set(DWMWA_USE_IMMERSIVE_DARK_MODE, 1);
+        set(DWMWA_BORDER_COLOR, 0x003d312a);
+    }
+    true
 }
 
 fn system_font() -> Option<render::FontRef<'static>> {
