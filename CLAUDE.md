@@ -12,4 +12,4 @@ Commits follow Conventional Commits; release-please builds the changelog from th
 
 Commits, PRs and comments stay free of session links and personal or employer details; the repo is public.
 
-Never push to `main` once the repo has a release; land changes through a PR.
+Never force-push `main` once the repo has a release.
