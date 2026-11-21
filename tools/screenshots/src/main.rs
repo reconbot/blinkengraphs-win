@@ -148,7 +148,7 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(
                 460.0,
-                if tab == Tab::Settings { 1750.0 } else { 1080.0 },
+                if tab == Tab::Settings { 2400.0 } else { 1080.0 },
             ))
             .with_pixels_per_point(2.0)
             .allow_missing_glyphs()

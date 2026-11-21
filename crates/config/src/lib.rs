@@ -351,6 +351,10 @@ pub struct HistoryConfig {
     pub rollup_days: u32,
 }
 
+impl HistoryConfig {
+    pub const MAX_DAYS: u32 = 365;
+}
+
 impl Default for HistoryConfig {
     fn default() -> Self {
         Self {
@@ -459,6 +463,7 @@ impl Config {
             }
             self.groups = vec![merged];
         }
+        self.history.rollup_days = self.history.rollup_days.clamp(1, HistoryConfig::MAX_DAYS);
         let ram = self.history.ram_minutes as u64 * 60;
         for v in self.probe_views.values_mut() {
             v.window_secs = v.window_secs.clamp(1, ram.max(1));

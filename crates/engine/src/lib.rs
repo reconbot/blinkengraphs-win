@@ -144,6 +144,11 @@ fn run(
                     col.set_adapter(adapter(&c));
                 }
                 prober.reconfigure(groups(&c));
+                shared
+                    .lock()
+                    .unwrap()
+                    .history
+                    .set_rollup_days(c.history.rollup_days);
                 config = *c;
             }
             Err(RecvTimeoutError::Disconnected) => return,
