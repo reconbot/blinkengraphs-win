@@ -207,36 +207,36 @@ impl History {
             .map(|(t, _)| *t)
             .unwrap_or(until + 1);
         let mut out = Vec::new();
-        if since < ram_start {
-            if let Some(db) = &self.db {
-                let mut stmt = db
-                    .prepare_cached(
-                        "SELECT minute, min, mean, max, loss FROM rollup
+        if since < ram_start
+            && let Some(db) = &self.db
+        {
+            let mut stmt = db
+                .prepare_cached(
+                    "SELECT minute, min, mean, max, loss FROM rollup
                          WHERE key = ?1 AND minute >= ?2 AND minute < ?3 ORDER BY minute",
-                    )
-                    .expect("static SQL");
-                let rows = stmt.query_map(
-                    params![
-                        key.id(),
-                        (since / 60 * 60) as i64,
-                        ram_start.min(until) as i64
-                    ],
-                    |r| {
-                        let f = |i| {
-                            r.get::<_, Option<f64>>(i)
-                                .map(|v| v.unwrap_or(f64::NAN) as f32)
-                        };
-                        Ok(Point {
-                            at: r.get::<_, i64>(0)? as u64,
-                            min: f(1)?,
-                            mean: f(2)?,
-                            max: f(3)?,
-                            loss: r.get::<_, f64>(4)? as f32,
-                        })
-                    },
-                );
-                out.extend(rows.into_iter().flatten().flatten());
-            }
+                )
+                .expect("static SQL");
+            let rows = stmt.query_map(
+                params![
+                    key.id(),
+                    (since / 60 * 60) as i64,
+                    ram_start.min(until) as i64
+                ],
+                |r| {
+                    let f = |i| {
+                        r.get::<_, Option<f64>>(i)
+                            .map(|v| v.unwrap_or(f64::NAN) as f32)
+                    };
+                    Ok(Point {
+                        at: r.get::<_, i64>(0)? as u64,
+                        min: f(1)?,
+                        mean: f(2)?,
+                        max: f(3)?,
+                        loss: r.get::<_, f64>(4)? as f32,
+                    })
+                },
+            );
+            out.extend(rows.into_iter().flatten().flatten());
         }
         if let Some(q) = ram {
             out.extend(q.iter().filter(|(t, _)| (since..=until).contains(t)).map(
