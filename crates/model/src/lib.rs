@@ -145,7 +145,7 @@ pub struct ProcessRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(from = "String", into = "String")]
 pub enum Target {
     Gateway,
     SystemResolver,
@@ -189,14 +189,13 @@ impl From<Target> for String {
     }
 }
 
-impl TryFrom<String> for Target {
-    type Error = std::convert::Infallible;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Ok(match s.as_str() {
+impl From<String> for Target {
+    fn from(s: String) -> Self {
+        match s.as_str() {
             "gateway" => Target::Gateway,
             "system-dns" => Target::SystemResolver,
             _ => s.parse().map(Target::Addr).unwrap_or(Target::Host(s)),
-        })
+        }
     }
 }
 
