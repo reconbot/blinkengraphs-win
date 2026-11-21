@@ -1,12 +1,12 @@
-# Elevated Extras come from an optional companion service, not an elevated app
+# Elevated Extras come from an optional LocalSystem companion service, not an elevated app
 
 Superseded in part: ADR 0002's "detected when the app is already elevated". The UI never runs elevated.
 
 An installer running as admin cannot make later launches elevated, and Administrator protection makes every elevation interactive ([research 04](../research/04-elevated-extras.md)). So:
 
-- **UDP Hop Traces are dropped.** They were the only feature needing raw sockets. ICMP traces need no admin; TCP traces use `TCP_ICMP_ERROR_INFO` (ADR 0006). UDP remains a latency Probe.
-- **Bytes per process is the one Elevated Extra.** An optional per-machine service reads the Microsoft-Windows-Kernel-Network ETW provider only while the Panel is open and serves totals over a local named pipe whose ACL admits interactive users only.
-- **Account: LocalService if a spike shows it can enable that provider, else LocalSystem.** No Microsoft doc settles it; Velociraptor implies SYSTEM.
+- **The Elevated Extras are bytes per process and UDP Hop Traces.** An optional per-machine service reads the Microsoft-Windows-Kernel-Network ETW provider while the Panel is open, runs UDP Hop Traces over raw sockets, and serves both over a local named pipe whose ACL admits interactive users only.
+- **Account: LocalSystem.** Raw sockets need the Administrators group, which LocalService lacks. Research 04 ranked LocalService only on the condition that UDP Hop Traces were dropped; with two Extras needing the service, the user chose to keep them.
+- ICMP and TCP Hop Traces stay in the app, unprivileged (ADR 0006).
 - **Distribution:** a separate MSI, deployable by Intune or winget. Without it the app is unchanged.
 
 ## Considered Options

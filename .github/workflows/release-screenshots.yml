@@ -8,6 +8,10 @@ on:
         description: Release tag to annotate
         required: true
 
+concurrency:
+  group: release-screenshots-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -43,6 +47,6 @@ jobs:
 
           **Tray Icons** (actual size, then 4× zoom)
 
-          ![Tray Icons]($raw/isp-loss.png)
+          ![Tray Icons]($raw/tray-icons.png)
           NOTES
           gh release edit "$TAG" --notes-file notes.md

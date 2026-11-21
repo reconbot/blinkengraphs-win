@@ -14,7 +14,7 @@ Live CPU, memory, disk, network and latency graphs in the Windows 11 taskbar, in
 | Disk | active time % | MB/s, response time, queue |
 | Latency | RTT + loss to 1.1.1.1 | ICMP/TCP/DNS probes to gateway, 1.1.1.1, 8.8.8.8; per-hop trace |
 
-Every metric, probe and interval is configurable. Nothing needs Administrator; an optional companion service adds per-process network bytes.
+Every metric, probe and interval is configurable. Nothing needs Administrator; an optional companion service adds per-process network bytes and UDP hop traces.
 
 ## Screenshots
 
@@ -29,7 +29,7 @@ Taskbar Strip:
 
 Tray Icons (actual size, then 4× zoom):
 
-![Tray Icons during ISP loss](https://raw.githubusercontent.com/reconbot/blinkengraphs-win/ci-screenshots/main/isp-loss.png)
+![Tray Icons and Menu Icon](https://raw.githubusercontent.com/reconbot/blinkengraphs-win/ci-screenshots/main/tray-icons.png)
 
 ## Usage
 
@@ -55,7 +55,7 @@ Tray Icons (actual size, then 4× zoom):
   - Themes, and a color per Probe
   - Per displayed Probe: time window and aggregate (p99, p95, p50, avg, max)
   - Graph aggregate for all graphs (same choices)
-- [ ] **M3: Elevated Extras and distribution.** Optional companion service for per-process network bytes, after a spike on its account ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md)); autostart; SignPath signing; installer
+- [ ] **M3: Elevated Extras and distribution.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md)); autostart; SignPath signing; installer
 
 ## Docs
 

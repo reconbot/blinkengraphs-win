@@ -3,7 +3,7 @@
 
 use fixtures::Scenario;
 use model::Section;
-use render::{Image, Meter, Taskbar, meter};
+use render::{Image, Meter, Status, Taskbar, app_icon, meter};
 use std::{fmt::Write, fs, path::PathBuf};
 use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Transform};
 
@@ -22,14 +22,7 @@ fn main() {
     let prefix = args.next().unwrap_or_default();
     fs::create_dir_all(&out).unwrap();
 
-    let mut index =
-        String::from("| Scenario | Tray Icons (actual size above, 4× zoom below) |\n|---|---|\n");
-    for s in fixtures::all() {
-        let file = format!("{}.png", s.name);
-        sheet(&s).save_png(out.join(&file)).unwrap();
-        writeln!(index, "| {} | ![{}]({prefix}{file}) |", s.caption, s.name).unwrap();
-    }
-    index.push_str("\n| Taskbar Strip | |\n|---|---|\n");
+    let mut index = String::from("| Taskbar Strip | |\n|---|---|\n");
     for (file, caption) in strips(&out) {
         writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
     }
@@ -37,6 +30,14 @@ fn main() {
     for (file, caption) in panels(&out) {
         writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
     }
+    let busy = fixtures::all().remove(1);
+    sheet(&busy).save_png(out.join("tray-icons.png")).unwrap();
+    writeln!(
+        index,
+        "\n**Tray Icons** ({}): the five Meters, then the Menu Icon as app icon and in each Verdict color; actual size on dark and light taskbars, then 4× zoom\n\n![tray-icons]({prefix}tray-icons.png)",
+        busy.caption
+    )
+    .unwrap();
     fs::write(out.join("index.md"), index).unwrap();
 }
 
@@ -56,11 +57,20 @@ fn meters(s: &Scenario, px: u32, taskbar: Taskbar) -> Vec<Image> {
             };
             meter(section, &m, px, taskbar)
         })
+        .chain(
+            [
+                None,
+                Some(Status::Ok),
+                Some(Status::Warn),
+                Some(Status::Crit),
+            ]
+            .map(|status| app_icon(px, taskbar, status)),
+        )
         .collect()
 }
 
 fn sheet(s: &Scenario) -> Pixmap {
-    let n = Section::ALL.len() as u32;
+    let n = Section::ALL.len() as u32 + 4;
     let zoomed = ICON * ZOOM;
     let width = n * zoomed + (n + 1) * GAP;
     let height = 2 * TASKBAR + GAP + zoomed + GAP;
