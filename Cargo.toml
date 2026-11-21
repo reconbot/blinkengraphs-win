@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 model = { path = "crates/model" }
 render = { path = "crates/render" }
+palette = { path = "crates/palette" }
 fixtures = { path = "crates/fixtures" }
 config = { path = "crates/config" }
 history = { path = "crates/history" }

@@ -42,6 +42,7 @@ fn main() {
 }
 
 fn meters(s: &Scenario, px: u32, taskbar: Taskbar) -> Vec<Image> {
+    let pal = config::Config::default().appearance.palette(taskbar);
     Section::ALL
         .iter()
         .map(|&section| {
@@ -55,7 +56,7 @@ fn meters(s: &Scenario, px: u32, taskbar: Taskbar) -> Vec<Image> {
                 },
                 Section::Latency => Meter::Latency(&s.rtt),
             };
-            meter(section, &m, px, taskbar)
+            meter(section, &m, px, &pal)
         })
         .chain(
             [
@@ -64,7 +65,7 @@ fn meters(s: &Scenario, px: u32, taskbar: Taskbar) -> Vec<Image> {
                 Some(Status::Warn),
                 Some(Status::Crit),
             ]
-            .map(|status| app_icon(px, taskbar, status)),
+            .map(|status| app_icon(px, &pal, status)),
         )
         .collect()
 }

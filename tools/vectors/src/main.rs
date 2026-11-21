@@ -15,6 +15,7 @@ fn main() {
         "vectors/meters",
         "vectors/probe-stats",
         "vectors/hop-trace",
+        "vectors/sketch",
         "tokens",
         "fixtures/scenarios",
     ] {
@@ -36,6 +37,9 @@ fn main() {
         write(out, &format!("vectors/hop-trace/{name}.json"), &v);
     }
     write(out, "defaults.json", &defaults());
+    for (name, v) in sketch_vectors() {
+        write(out, &format!("vectors/sketch/{name}.json"), &v);
+    }
     write(out, "tokens/blinkengraphs.tokens.json", &tokens());
     for s in fixtures::all() {
         write(
@@ -459,4 +463,115 @@ fn defaults() -> Value {
         },
         "system_interval_ms": c.system_interval_ms,
     })
+}
+
+fn bits(v: f64) -> Value {
+    json!({"value": v, "bits": format!("{:016x}", v.to_bits())})
+}
+
+fn minute_json(m: &history::Minute) -> Value {
+    json!({
+        "n": m.n, "lost": m.lost,
+        "sum": (m.n > 0).then(|| bits(m.sum)),
+        "min": (m.n > 0).then(|| bits(m.min)),
+        "max": (m.n > 0).then(|| bits(m.max)),
+        "sk": m.sketch.encode().iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    })
+}
+
+/// Values a minute might hold: RTTs with jitter and a lost Probe, then a zero and a huge rate.
+fn sketch_minutes() -> Vec<Vec<Option<f32>>> {
+    let rtt = |base: f32| -> Vec<Option<f32>> {
+        (0..60)
+            .map(|i| (i % 17 != 0).then_some(base + (i * 37 % 23) as f32 * 0.7))
+            .collect()
+    };
+    vec![
+        rtt(12.0),
+        rtt(18.5),
+        rtt(95.0),
+        vec![Some(0.0), Some(0.25), Some(3.5e9), None],
+    ]
+}
+
+fn sketch_vectors() -> Vec<(&'static str, Value)> {
+    use history::{Minute, Sketch};
+    use model::Aggregate;
+    let below = f64::from_bits((1.0f64 / 1024.0).to_bits() - 1);
+    let below_one = f64::from_bits(1f64.to_bits() - 1);
+    let below_33 = f64::from_bits((33.0f64 / 32.0).to_bits() - 1);
+    let index: Vec<Value> = [
+        0.0,
+        -1.0,
+        below,
+        1.0 / 1024.0,
+        below_one,
+        1.0,
+        below_33,
+        33.0 / 32.0,
+        12.3,
+        1e10,
+        2f64.powi(40),
+        1e30,
+    ]
+    .into_iter()
+    .map(|v| {
+        let i = history::sketch_index(v);
+        json!({"value": bits(v), "index": i, "rep": i.map(|i| bits(history::sketch_rep(i)))})
+    })
+    .collect();
+    let minutes: Vec<Minute> = sketch_minutes().iter().map(|vs| Minute::of(vs)).collect();
+    let merged = |order: &[usize]| {
+        let mut acc = Minute::default();
+        for i in order {
+            acc.merge(&minutes[*i]);
+        }
+        acc
+    };
+    let forward = merged(&[0, 1, 2, 3]);
+    let aggregates = |m: &Minute| -> Value {
+        Aggregate::ALL
+            .iter()
+            .map(|a| {
+                (
+                    a.label().to_string(),
+                    m.value(*a).map(bits).unwrap_or(Value::Null),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    };
+    let reversed = {
+        let mut s = Sketch::default();
+        for i in [3, 2, 1, 0] {
+            s.merge(&minutes[i].sketch);
+        }
+        s
+    };
+    assert_eq!(reversed, forward.sketch, "merge order must not matter");
+    vec![
+        (
+            "index",
+            json!({
+                "description": "Bucket index (null = zero bucket) and representative value for chosen inputs. f64 values carry their exact bits.",
+                "cases": index,
+            }),
+        ),
+        (
+            "minutes",
+            json!({
+                "description": "Per-minute rollups from raw values in arrival order (null = lost); sk is the hex of the encoded sketch.",
+                "cases": sketch_minutes().iter().zip(&minutes).map(|(vs, m)| json!({"values": vs, "minute": minute_json(m)})).collect::<Vec<_>>(),
+            }),
+        ),
+        (
+            "merge",
+            json!({
+                "description": "Merging the minutes of the minutes vector in ascending order, and the aggregates a graph bucket shows. Merging sketches in any order gives the same sk.",
+                "merged": minute_json(&forward),
+                "loss": r2(forward.loss()),
+                "aggregates": aggregates(&forward),
+            }),
+        ),
+    ]
 }

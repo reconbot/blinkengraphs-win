@@ -77,6 +77,7 @@ pub struct Panel {
     pub range: Range,
     pub sort: ProcessSort,
     scroll_to_top: bool,
+    graph_aggregate: model::Aggregate,
 }
 
 /// Impact ranks by CPU and memory together, each as a share of the busiest process listed.
@@ -95,6 +96,7 @@ impl Default for Panel {
             range: Range::Min1,
             sort: ProcessSort::Impact,
             scroll_to_top: false,
+            graph_aggregate: model::Aggregate::Avg,
         }
     }
 }
@@ -108,6 +110,8 @@ impl Panel {
 
     pub fn show(&mut self, ui: &mut Ui, view: &View, config: &mut Config) -> Vec<Action> {
         let mut actions = Vec::new();
+        theme::apply(ui.ctx(), &config.appearance);
+        self.graph_aggregate = config.graph_aggregate;
         egui::CentralPanel::default()
             .frame(theme::window_frame())
             .show(ui, |ui| {
@@ -153,7 +157,7 @@ impl Panel {
         ui.add_space(6.0);
         verdict_banner(ui, view.findings);
         if let Some(e) = view.config_error {
-            ui.colored_label(theme::WARN, format!("Config not loaded: {e}"));
+            ui.colored_label(theme::warn(), format!("Config not loaded: {e}"));
         }
         if self.tab != Tab::Settings {
             ui.add_space(6.0);
@@ -182,20 +186,22 @@ impl Panel {
         })
         .filter(|(_, m)| !m.is_empty())
         .collect();
-        for pair in shown.chunks(2) {
+        // Two independent columns, so a short card doesn't leave a gap beside a tall one.
+        if !shown.is_empty() {
             ui.columns(2, |cols| {
-                for (col, (section, plotted)) in cols.iter_mut().zip(pair) {
+                for (i, (section, plotted)) in shown.iter().enumerate() {
+                    let col = &mut cols[i % 2];
                     card(col, *section, |ui| {
                         self.section_card(ui, view, *section, plotted, s)
                     });
+                    col.add_space(8.0);
                 }
             });
-            ui.add_space(8.0);
         }
         let ping = &config.section(Section::Latency).panel;
         if !ping.is_empty() {
             card(ui, Section::Latency, |ui| {
-                self.latency_card(ui, view, false, ping)
+                self.latency_card(ui, view, config, false, ping)
             });
             ui.add_space(8.0);
         }
@@ -236,7 +242,7 @@ impl Panel {
             .enumerate()
             .map(|(i, m)| {
                 let color = match (i, m) {
-                    (_, Metric::NetUp) => theme::UPLOAD,
+                    (_, Metric::NetUp) => theme::upload(),
                     (0, _) => accent(section),
                     _ => theme::series(i),
                 };
@@ -276,7 +282,14 @@ impl Panel {
         }
     }
 
-    fn latency_card(&self, ui: &mut Ui, view: &View, all: bool, shown: &[Readout]) {
+    fn latency_card(
+        &self,
+        ui: &mut Ui,
+        view: &View,
+        config: &Config,
+        all: bool,
+        shown: &[Readout],
+    ) {
         let (latency, loss) = (
             shown.contains(&Readout::Ping(Ping::Latency)),
             shown.contains(&Readout::Ping(Ping::Loss)),
@@ -290,11 +303,9 @@ impl Panel {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(p) = probes.first() {
-                    let st = view.history.stat(p, history::RECENT_SECS);
-                    let rtt = st
-                        .rtt_ms
-                        .map(|r| format!("{r:.0} ms"))
-                        .unwrap_or("—".into());
+                    let v = config.probe_view(p);
+                    let st = view.history.aggregate(p, v.window_secs, v.aggregate);
+                    let rtt = st.value.map(|r| format!("{r:.0} ms")).unwrap_or("—".into());
                     let text = match (latency, loss) {
                         (true, true) => format!("{rtt}  {:.0}% loss", st.loss * 100.0),
                         (true, false) => rtt,
@@ -310,7 +321,7 @@ impl Panel {
             .map(|(i, p)| {
                 (
                     p.to_string(),
-                    theme::series(i),
+                    theme::probe(p, i),
                     self.points(view, &Key::Probe(p.clone())),
                 )
             })
@@ -325,19 +336,22 @@ impl Panel {
         );
         ui.horizontal_wrapped(|ui| {
             for (i, p) in probes.iter().enumerate() {
+                let v = config.probe_view(p);
+                let sum = view.history.aggregate(p, v.window_secs, v.aggregate);
                 let st = view.history.stat(p, history::RECENT_SECS);
                 let text = format!(
-                    "{p}  {}  {:.0}%{}",
-                    st.rtt_ms
+                    "{p}  {} {}  {:.0}%{}",
+                    v.aggregate.label(),
+                    sum.value
                         .map(|r| format!("{r:.1} ms"))
                         .unwrap_or("—".into()),
-                    st.loss * 100.0,
+                    sum.loss * 100.0,
                     st.jitter_ms
                         .map(|j| format!("  ±{j:.1}"))
                         .unwrap_or_default()
                 );
-                dot(ui, theme::series(i), 3.5);
-                ui.label(RichText::new(text).small().color(theme::series(i)));
+                dot(ui, theme::probe(p, i), 3.5);
+                ui.label(RichText::new(text).small().color(theme::probe(p, i)));
             }
         });
     }
@@ -345,7 +359,7 @@ impl Panel {
     fn network(&self, ui: &mut Ui, view: &View, config: &Config) {
         let all = [Readout::Ping(Ping::Latency), Readout::Ping(Ping::Loss)];
         card(ui, Section::Latency, |ui| {
-            self.latency_card(ui, view, true, &all)
+            self.latency_card(ui, view, config, true, &all)
         });
         for trace in config
             .groups
@@ -368,10 +382,19 @@ impl Panel {
     }
 
     fn points(&self, view: &View, key: &Key) -> Vec<Point> {
-        view.history
-            .series(key, view.now.saturating_sub(self.range.secs()), view.now)
+        let secs = self.range.secs();
+        view.history.series(
+            key,
+            view.now.saturating_sub(secs),
+            view.now,
+            (secs / GRAPH_POINTS).max(1),
+            self.graph_aggregate,
+        )
     }
 }
+
+/// Buckets per graph: about one per pixel of a half-width card.
+const GRAPH_POINTS: u64 = 240;
 
 fn latency_probes(h: &History, all: bool) -> Vec<Probe> {
     let mut v: Vec<Probe> = h
@@ -417,7 +440,9 @@ fn dot(ui: &mut Ui, color: Color32, r: f32) {
 }
 
 fn cores(ui: &mut Ui, per_core: &[f32]) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), egui::Sense::hover());
+    ui.label(RichText::new("Cores").small().weak());
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 10.0), egui::Sense::hover());
     let n = per_core.len().max(1) as f32;
     let w = rect.width() / n;
     for (i, v) in per_core.iter().enumerate() {
@@ -429,11 +454,17 @@ fn cores(ui: &mut Ui, per_core: &[f32]) {
         ui.painter()
             .rect_filled(r, 2.0, c.gamma_multiply(0.25 + 0.75 * v / 100.0));
     }
+    if let Some(pos) = resp.hover_pos() {
+        let i = (((pos.x - rect.left()) / w) as usize).min(per_core.len().saturating_sub(1));
+        if let Some(v) = per_core.get(i) {
+            resp.on_hover_text_at_pointer(format!("Core {i}: {v:.0}%"));
+        }
+    }
 }
 
 fn processes(ui: &mut Ui, rows: &[ProcessRow], sort: &mut ProcessSort) {
     egui::Frame::new()
-        .fill(theme::CARD)
+        .fill(theme::card_fill())
         .corner_radius(10.0)
         .inner_margin(10.0)
         .show(ui, |ui| {
@@ -478,7 +509,7 @@ fn processes(ui: &mut Ui, rows: &[ProcessRow], sort: &mut ProcessSort) {
                         };
                         let rt = RichText::new(text).small();
                         let rt = if active {
-                            rt.color(theme::TEXT)
+                            rt.color(theme::text())
                         } else {
                             rt.weak()
                         };
@@ -601,11 +632,11 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
     );
     for (i, hop) in hops.iter().enumerate() {
         let loss_color = if hop.loss >= 0.2 {
-            theme::CRIT
+            theme::crit()
         } else if hop.loss > 0.0 {
-            theme::WARN
+            theme::warn()
         } else {
-            theme::TEXT_WEAK
+            theme::text_weak()
         };
         let cells = [
             (22.0, RichText::new(hop.ttl.to_string()).weak()),
@@ -652,8 +683,8 @@ fn to_line(
 ) -> Line<'static> {
     let xy: Vec<[f64; 2]> = pts
         .iter()
-        .filter(|p| p.mean.is_finite())
-        .map(|p| [p.at as f64 - w.now, p.mean as f64])
+        .filter(|p| p.value.is_finite())
+        .map(|p| [p.at as f64 - w.now, p.value as f64])
         .collect();
     let line = Line::new(name, PlotPoints::from(xy))
         .color(color)
@@ -710,7 +741,7 @@ fn multiplot(
                 if !lost.is_empty() {
                     pu.points(
                         egui_plot::Points::new(format!("{name} loss"), lost)
-                            .color(theme::CRIT)
+                            .color(theme::crit())
                             .radius(2.5),
                     );
                 }
@@ -729,9 +760,16 @@ fn unrecorded<'a>(
         .reduce(f64::min)
         .unwrap_or(0.0);
     if first > -w.secs + w.secs * 0.01 {
+        // The label is drawn inside the span, so a narrow span gets none rather than a clipped one.
+        let label = if first + w.secs > w.secs * 0.3 {
+            "no data"
+        } else {
+            ""
+        };
+        let t = theme::text();
         pu.span(
-            egui_plot::Span::new("not recorded", -w.secs..=first)
-                .fill(Color32::from_white_alpha(8))
+            egui_plot::Span::new(label, -w.secs..=first)
+                .fill(Color32::from_rgba_unmultiplied(t.r(), t.g(), t.b(), 10))
                 .border_width(0.0),
         );
     }
