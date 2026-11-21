@@ -87,6 +87,9 @@ jobs:
           git fetch -q --depth 1 origin ci-screenshots && git checkout -q FETCH_HEAD || git checkout -q --orphan ci-screenshots
           mkdir -p "$SHA" && cp ../out/*.png "$SHA/"
           git add "$SHA"
+          if [ "${{ github.event_name }}" = push ]; then
+            rm -rf main && mkdir main && cp ../out/*.png main/ && git add -A main
+          fi
           git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -qm "screenshots $SHA"
           git push -q origin HEAD:ci-screenshots
           prefix="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/$SHA/"

@@ -16,30 +16,41 @@ Live CPU, memory, disk, network and latency graphs in the Windows 11 taskbar, in
 
 Every metric, probe and interval is configurable. Nothing needs Administrator; when run elevated, it adds per-process network bytes and UDP hop traces.
 
+## Screenshots
+
+Rendered by CI from fixture data on every push to `main`.
+
+![Panel during ISP packet loss](https://raw.githubusercontent.com/reconbot/blinkengraphs/ci-screenshots/main/panel-isp-loss-overview.png)
+![Network tab with hop trace](https://raw.githubusercontent.com/reconbot/blinkengraphs/ci-screenshots/main/panel-isp-loss-network.png)
+
+Taskbar Strip:
+
+![Taskbar Strip during upload saturation](https://raw.githubusercontent.com/reconbot/blinkengraphs/ci-screenshots/main/strip-upload-saturation.png)
+
+Tray Icons (actual size, then 4× zoom):
+
+![Tray Icons during ISP loss](https://raw.githubusercontent.com/reconbot/blinkengraphs/ci-screenshots/main/isp-loss.png)
+
+## Usage
+
+- Click any Meter, or press `Ctrl+Shift+Alt+M`, to open the Panel. Click away or press `Esc` to close it.
+- Right-click a Meter for Open, Settings and Quit.
+- Settings live in `%APPDATA%\blinkengraphs\config.toml`; the Settings tab edits them live. History is stored in `history.db` in the same folder.
+- Windows 11 hides new tray icons in the overflow menu: drag them onto the taskbar, or switch Surface to **Taskbar Strip**.
+
 ## Milestones
 
-- **M0: skeleton.** Status: in progress.
-  - [x] Workspace; cross-compile from Linux (`cargo xwin build --target x86_64-pc-windows-msvc`)
-  - [x] Meter renderer and fixture screenshots
-  - [x] Tray demo that replays a fixture
-  - [ ] Windows CI for x64 and ARM64, with screenshots in the PR comment and job summary
-  - [ ] release-please, the rolling `main-latest` prerelease, and build attestations
-  - [ ] TCP hop-trace spike, with the result recorded as an ADR
-- **M1: Tray Icons, Probes, Panel.**
-  - Real collectors
-  - ICMP/TCP/DNS probes and ICMP hop trace
+- [x] **M0: skeleton.** Cargo workspace, Windows CI for x64 and ARM64, screenshots from fixtures, release-please, rolling `main-latest`, TCP hop-trace spike ([ADR 0006](docs/adr/0006-tcp-hop-traces-experimental.md))
+- [x] **M1: Tray Icons, Probes, Panel.**
+  - Collectors (PDH, IP Helper) and ICMP/TCP/DNS probes with an ICMP hop trace
   - Verdict
-  - egui Panel
-  - Settings menu and TOML config
+  - egui Panel with Settings
   - Hotkey
-  - Pause when the display is off or the session is locked
-- **M2: Taskbar Strip and History** (M1 + M2 = v1.0).
-  - Strip docked in the taskbar, falling back to tray icons
-  - 7 days of per-minute history in SQLite
-- **M3: Elevated Extras and distribution.**
-  - Per-process network bytes and UDP hop trace
-  - Autostart
-  - SignPath signing
+  - Pause while locked, display off or screen saver running
+- [x] **M2: Taskbar Strip and History.**
+  - Strip docked in the taskbar, falling back to Tray Icons
+  - 7 days of one-minute Rollups in SQLite, browsable in the Panel's history ranges
+- [ ] **M3: Elevated Extras and distribution.** Per-process network bytes and UDP hop traces when elevated; autostart; SignPath signing; installer
 
 ## Docs
 
