@@ -27,9 +27,23 @@ fn main() {
         last = s.sample_count;
         for section in model::Section::ALL {
             let c = config.section(section);
-            std::hint::black_box(meters::draw(section, &s.history, &config, &c.meter, 24));
+            std::hint::black_box(meters::draw(
+                section,
+                &s.history,
+                &config,
+                &c.meter,
+                24,
+                render::Taskbar::Dark,
+            ));
         }
-        std::hint::black_box(meters::strip(&s.history, &config, 40, 1.0, None));
+        std::hint::black_box(meters::strip(
+            &s.history,
+            &config,
+            40,
+            1.0,
+            None,
+            render::Taskbar::Dark,
+        ));
         drawn += 1;
     }
     engine.panel_open.store(false, Ordering::Relaxed);

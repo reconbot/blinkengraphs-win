@@ -207,6 +207,7 @@ impl Panel {
             matches!(primary.unit(), Unit::Percent).then_some(100.0),
             70.0,
             fmt,
+            self.window(view),
         );
         ui.horizontal_wrapped(|ui| {
             for m in metrics
@@ -264,7 +265,13 @@ impl Panel {
             })
             .collect();
         let names: Vec<(String, Color32, Vec<Point>)> = series;
-        multiplot(ui, "latency", &names, if all { 180.0 } else { 110.0 });
+        multiplot(
+            ui,
+            "latency",
+            &names,
+            if all { 180.0 } else { 110.0 },
+            self.window(view),
+        );
         ui.horizontal_wrapped(|ui| {
             for (i, p) in probes.iter().enumerate() {
                 let st = view.history.stat(p, history::RECENT_SECS);
@@ -296,6 +303,13 @@ impl Panel {
             card(ui, Section::Latency, |ui| {
                 hop_table(ui, view.history, trace)
             });
+        }
+    }
+
+    fn window(&self, view: &View) -> Window {
+        Window {
+            now: view.now as f64,
+            secs: self.range.secs() as f64,
         }
     }
 
@@ -375,26 +389,63 @@ fn processes(ui: &mut Ui, rows: &[ProcessRow]) {
                 ui.label(RichText::new("Sampling…").weak());
                 return;
             }
-            egui::Grid::new("procs")
-                .num_columns(4)
-                .striped(true)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    for h in ["Process", "CPU", "Memory", "Disk"] {
-                        ui.label(RichText::new(h).small().weak());
-                    }
-                    ui.end_row();
-                    for r in rows.iter().take(8) {
-                        ui.label(&r.name);
-                        ui.label(
-                            RichText::new(format!("{:.1}%", r.cpu_pct))
-                                .color(theme::level(Section::Cpu, r.cpu_pct / 100.0)),
-                        );
-                        ui.label(bytes(r.memory_bytes as f64));
-                        ui.label(format!("{}/s", bytes(r.disk_bps)));
-                        ui.end_row();
-                    }
-                });
+            let cols = [
+                (0.0, "Process"),
+                (56.0, "CPU"),
+                (72.0, "Memory"),
+                (80.0, "Disk"),
+            ];
+            table_row(
+                ui,
+                &cols.map(|(w, h)| (w, RichText::new(h).small().weak())),
+                false,
+            );
+            for (i, r) in rows.iter().take(8).enumerate() {
+                let cells = [
+                    (0.0, RichText::new(&r.name)),
+                    (
+                        56.0,
+                        RichText::new(format!("{:.1}%", r.cpu_pct))
+                            .color(theme::level(Section::Cpu, r.cpu_pct / 100.0)),
+                    ),
+                    (72.0, RichText::new(bytes(r.memory_bytes as f64))),
+                    (80.0, RichText::new(format!("{}/s", bytes(r.disk_bps)))),
+                ];
+                table_row(ui, &cells, i % 2 == 1);
+            }
+        });
+}
+
+/// Fixed-width columns so values don't shift as rows change. Width 0 takes the remaining space,
+/// left-aligned and truncated; every other column is right-aligned.
+fn table_row(ui: &mut Ui, cells: &[(f32, RichText)], stripe: bool) {
+    let fixed: f32 = cells.iter().map(|(w, _)| w).sum();
+    let gap = 8.0;
+    let flex = (ui.available_width() - fixed - gap * cells.len() as f32).max(40.0);
+    let fill = if stripe {
+        theme::faint()
+    } else {
+        Color32::TRANSPARENT
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (w, text) in cells {
+                    let (width, layout) = if *w == 0.0 {
+                        (flex, Layout::left_to_right(Align::Center))
+                    } else {
+                        (*w, Layout::right_to_left(Align::Center))
+                    };
+                    ui.allocate_ui_with_layout(vec2(width, 18.0), layout, |ui| {
+                        ui.set_width(width);
+                        ui.add(egui::Label::new(text.clone()).truncate());
+                    });
+                }
+            });
         });
 }
 
@@ -410,33 +461,45 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
         return;
     }
     let ms = |v: Option<f32>| v.map(|v| format!("{v:.1}")).unwrap_or("—".into());
-    egui::Grid::new(("hops", trace.to_string()))
-        .num_columns(7)
-        .striped(true)
-        .spacing([12.0, 3.0])
-        .show(ui, |ui| {
-            for c in ["#", "Address", "Loss", "Last", "Avg", "Best", "Worst"] {
-                ui.label(RichText::new(c).small().weak());
-            }
-            ui.end_row();
-            for hop in hops {
-                ui.label(RichText::new(hop.ttl.to_string()).weak());
-                ui.label(hop.addr.map(|a| a.to_string()).unwrap_or("???".into()));
-                let loss_color = if hop.loss >= 0.2 {
-                    theme::CRIT
-                } else if hop.loss > 0.0 {
-                    theme::WARN
-                } else {
-                    theme::TEXT_WEAK
-                };
-                ui.label(RichText::new(format!("{:.0}%", hop.loss * 100.0)).color(loss_color));
-                ui.label(ms(hop.last_ms));
-                ui.label(ms(hop.avg_ms));
-                ui.label(ms(hop.best_ms));
-                ui.label(ms(hop.worst_ms));
-                ui.end_row();
-            }
-        });
+    let cols: [(f32, &str); 7] = [
+        (22.0, "#"),
+        (0.0, "Address"),
+        (40.0, "Loss"),
+        (44.0, "Last"),
+        (44.0, "Avg"),
+        (44.0, "Best"),
+        (44.0, "Worst"),
+    ];
+    table_row(
+        ui,
+        &cols.map(|(w, h)| (w, RichText::new(h).small().weak())),
+        false,
+    );
+    for (i, hop) in hops.iter().enumerate() {
+        let loss_color = if hop.loss >= 0.2 {
+            theme::CRIT
+        } else if hop.loss > 0.0 {
+            theme::WARN
+        } else {
+            theme::TEXT_WEAK
+        };
+        let cells = [
+            (22.0, RichText::new(hop.ttl.to_string()).weak()),
+            (
+                0.0,
+                RichText::new(hop.addr.map(|a| a.to_string()).unwrap_or("???".into())),
+            ),
+            (
+                40.0,
+                RichText::new(format!("{:.0}%", hop.loss * 100.0)).color(loss_color),
+            ),
+            (44.0, RichText::new(ms(hop.last_ms))),
+            (44.0, RichText::new(ms(hop.avg_ms))),
+            (44.0, RichText::new(ms(hop.best_ms))),
+            (44.0, RichText::new(ms(hop.worst_ms))),
+        ];
+        table_row(ui, &cells, i % 2 == 1);
+    }
 }
 
 fn format_value(m: Metric, v: f64) -> String {
@@ -449,12 +512,24 @@ fn format_value(m: Metric, v: f64) -> String {
     }
 }
 
-fn to_line(name: impl Into<String>, color: Color32, pts: &[Point], fill: bool) -> Line<'static> {
-    let newest = pts.last().map(|p| p.at).unwrap_or(0) as f64;
+/// The plotted time range: x runs from -`secs` to 0, where 0 is `now`.
+#[derive(Clone, Copy)]
+struct Window {
+    now: f64,
+    secs: f64,
+}
+
+fn to_line(
+    name: impl Into<String>,
+    color: Color32,
+    pts: &[Point],
+    fill: bool,
+    w: Window,
+) -> Line<'static> {
     let xy: Vec<[f64; 2]> = pts
         .iter()
         .filter(|p| p.mean.is_finite())
-        .map(|p| [p.at as f64 - newest, p.mean as f64])
+        .map(|p| [p.at as f64 - w.now, p.mean as f64])
         .collect();
     let line = Line::new(name, PlotPoints::from(xy))
         .color(color)
@@ -473,32 +548,40 @@ fn sparkplot(
     max: Option<f64>,
     height: f32,
     fmt: impl Fn(f64) -> String + 'static,
+    w: Window,
 ) {
-    let mut plot = base_plot(id, height)
+    let mut plot = base_plot(id, height, w)
         .include_y(0.0)
         .y_axis_formatter(move |m, _| fmt(m.value));
     if let Some(m) = max {
         plot = plot.include_y(m);
     }
     plot.show(ui, |pu| {
+        unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
         for (name, color, pts) in &series {
-            pu.line(to_line(*name, *color, pts, true));
+            pu.line(to_line(*name, *color, pts, true, w));
         }
     });
 }
 
-fn multiplot(ui: &mut Ui, id: &str, series: &[(String, Color32, Vec<Point>)], height: f32) {
-    base_plot(id, height)
+fn multiplot(
+    ui: &mut Ui,
+    id: &str,
+    series: &[(String, Color32, Vec<Point>)],
+    height: f32,
+    w: Window,
+) {
+    base_plot(id, height, w)
         .include_y(0.0)
         .y_axis_formatter(|m, _| format!("{:.0} ms", m.value))
         .show(ui, |pu| {
+            unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
             for (name, color, pts) in series {
-                pu.line(to_line(name.clone(), *color, pts, false));
-                let newest = pts.last().map(|p| p.at).unwrap_or(0) as f64;
+                pu.line(to_line(name.clone(), *color, pts, false, w));
                 let lost: Vec<[f64; 2]> = pts
                     .iter()
                     .filter(|p| p.loss > 0.0)
-                    .map(|p| [p.at as f64 - newest, 0.0])
+                    .map(|p| [p.at as f64 - w.now, 0.0])
                     .collect();
                 if !lost.is_empty() {
                     pu.points(
@@ -511,8 +594,29 @@ fn multiplot(ui: &mut Ui, id: &str, series: &[(String, Color32, Vec<Point>)], he
         });
 }
 
-fn base_plot(id: &str, height: f32) -> Plot<'static> {
+/// Shades the part of the window before the first recorded point, so a 24h view of 20 minutes of data reads as such.
+fn unrecorded<'a>(
+    pu: &mut egui_plot::PlotUi,
+    w: Window,
+    series: impl Iterator<Item = &'a [Point]>,
+) {
+    let first = series
+        .filter_map(|p| p.first().map(|p| p.at as f64 - w.now))
+        .reduce(f64::min)
+        .unwrap_or(0.0);
+    if first > -w.secs + w.secs * 0.01 {
+        pu.span(
+            egui_plot::Span::new("not recorded", -w.secs..=first)
+                .fill(Color32::from_white_alpha(8))
+                .border_width(0.0),
+        );
+    }
+}
+
+fn base_plot(id: &str, height: f32, w: Window) -> Plot<'static> {
     Plot::new(id.to_owned())
+        .include_x(-w.secs)
+        .include_x(0.0)
         .height(height)
         .show_axes([false, true])
         .show_grid([false, true])

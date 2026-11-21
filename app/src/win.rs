@@ -59,7 +59,8 @@ pub fn run() {
             .with_resizable(false)
             .with_taskbar(false)
             .with_always_on_top()
-            .with_visible(false),
+            .with_visible(false)
+            .with_position([-32000.0, -32000.0]),
         ..Default::default()
     };
     let _ = eframe::run_native(
@@ -221,9 +222,17 @@ impl App {
             return;
         }
         self.drawn_samples = s.sample_count;
+        let taskbar = taskbar_theme();
         let attached = self.config.surface == Surface::TaskbarStrip
             && self.strip.geometry().is_some_and(|(scale, h)| {
-                let img = meters::strip(&s.history, &self.config, h, scale, self.font.as_ref());
+                let img = meters::strip(
+                    &s.history,
+                    &self.config,
+                    h,
+                    scale,
+                    self.font.as_ref(),
+                    taskbar,
+                );
                 self.strip.show(&img)
             });
         if !attached {
@@ -243,7 +252,14 @@ impl App {
             if !shown {
                 continue;
             }
-            let img = meters::draw(*section, &s.history, &self.config, &c.meter, self.px);
+            let img = meters::draw(
+                *section,
+                &s.history,
+                &self.config,
+                &c.meter,
+                self.px,
+                taskbar,
+            );
             if let Ok(i) = Icon::from_rgba(render::to_rgba(&img), self.px, self.px) {
                 let _ = icon.set_icon(Some(i));
             }
@@ -315,6 +331,10 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.styled {
             self.styled = style_window();
+            // eframe shows the root viewport after its first frame even when built invisible.
+            if self.styled && !self.visible {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            }
         }
         while let Ok(e) = self.events.try_recv() {
             match e {
@@ -414,6 +434,29 @@ fn style_window() -> bool {
         set(DWMWA_BORDER_COLOR, 0x003d312a);
     }
     true
+}
+
+/// Windows lets the taskbar be light while apps are dark, so Meters follow the taskbar, not the app theme.
+fn taskbar_theme() -> render::Taskbar {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let mut light: u32 = 0;
+    let mut size = 4u32;
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            windows_sys::core::w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            windows_sys::core::w!("SystemUsesLightTheme"),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut light as *mut u32).cast(),
+            &mut size,
+        )
+    } == 0;
+    if ok && light != 0 {
+        render::Taskbar::Light
+    } else {
+        render::Taskbar::Dark
+    }
 }
 
 fn system_font() -> Option<render::FontRef<'static>> {

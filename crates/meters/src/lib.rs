@@ -1,10 +1,17 @@
 use config::Config;
 use history::{History, Key};
 use model::{Metric, Section, Unit};
-use render::{Cell, FontRef, Image, Meter, cube_root, meter};
+use render::{Cell, FontRef, Image, Meter, Taskbar, cube_root, meter};
 
 /// Draws one Section's Meter at `px` from the last `px` samples, per the Section's configured Metrics.
-pub fn draw(section: Section, h: &History, config: &Config, metrics: &[Metric], px: u32) -> Image {
+pub fn draw(
+    section: Section,
+    h: &History,
+    config: &Config,
+    metrics: &[Metric],
+    px: u32,
+    taskbar: Taskbar,
+) -> Image {
     let n = px as usize;
     match section {
         Section::Latency => {
@@ -18,7 +25,7 @@ pub fn draw(section: Section, h: &History, config: &Config, metrics: &[Metric], 
                 .into_iter()
                 .map(|r| r.map(|ms| (ms / scale).min(1.0)))
                 .collect();
-            meter(section, &Meter::Latency(&v), px)
+            meter(section, &Meter::Latency(&v), px, taskbar)
         }
         Section::Network
             if metrics.contains(&Metric::NetDown) && metrics.contains(&Metric::NetUp) =>
@@ -36,15 +43,15 @@ pub fn draw(section: Section, h: &History, config: &Config, metrics: &[Metric], 
                     .collect::<Vec<_>>()
             };
             let (d, u) = (norm(down), norm(up));
-            meter(section, &Meter::Duplex { down: &d, up: &u }, px)
+            meter(section, &Meter::Duplex { down: &d, up: &u }, px, taskbar)
         }
         _ => {
             let Some(&m) = metrics.first() else {
-                return meter(section, &Meter::Level(&[]), px);
+                return meter(section, &Meter::Level(&[]), px, taskbar);
             };
             let raw = h.recent(&Key::Metric(m), n);
             let v = normalize(m, &raw);
-            meter(section, &Meter::Level(&v), px)
+            meter(section, &Meter::Level(&v), px, taskbar)
         }
     }
 }
@@ -71,6 +78,7 @@ pub fn strip(
     height: u32,
     scale: f32,
     font: Option<&FontRef>,
+    taskbar: Taskbar,
 ) -> Image {
     let n = 60usize;
     let mut owned: Vec<Owned> = Vec::new();
@@ -144,7 +152,7 @@ pub fn strip(
             },
         })
         .collect();
-    render::strip(&cells, height, scale, font)
+    render::strip(&cells, height, scale, font, taskbar)
 }
 
 /// Windows truncates notification-area tooltips to 128 characters.
@@ -211,7 +219,14 @@ mod tests {
         fixtures::populate(&mut h, &s, 1_800_000_000);
         let c = Config::default();
         for section in Section::ALL {
-            let img = draw(section, &h, &c, &c.section(section).meter, 24);
+            let img = draw(
+                section,
+                &h,
+                &c,
+                &c.section(section).meter,
+                24,
+                Taskbar::Dark,
+            );
             assert_eq!(img.width(), 24);
             assert!(
                 img.pixels().iter().any(|p| p.alpha() == 255),

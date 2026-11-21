@@ -1,4 +1,4 @@
-use crate::{Image, Meter, meter};
+use crate::{Image, Meter, Taskbar, meter};
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use model::Section;
 use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Transform};
@@ -18,7 +18,14 @@ pub fn width(n: usize) -> f32 {
 }
 
 /// One rounded cell per Section: graph behind, label top-left, value bottom-right.
-pub fn strip(cells: &[Cell], height: u32, scale: f32, font: Option<&FontRef>) -> Image {
+pub fn strip(
+    cells: &[Cell],
+    height: u32,
+    scale: f32,
+    font: Option<&FontRef>,
+    taskbar: Taskbar,
+) -> Image {
+    let light = taskbar == Taskbar::Light;
     let w = (width(cells.len()) * scale).ceil().max(1.0) as u32;
     let mut img = Pixmap::new(w, height.max(1)).expect("size");
     let cell_w = (CELL_W * scale).round() as u32;
@@ -27,8 +34,12 @@ pub fn strip(cells: &[Cell], height: u32, scale: f32, font: Option<&FontRef>) ->
     for (i, c) in cells.iter().enumerate() {
         let x = (i as f32 * (CELL_W + GAP) * scale).round() as i32;
         let mut cell = Pixmap::new(cell_w, graph_h).unwrap();
-        cell.fill(Color::from_rgba8(0xff, 0xff, 0xff, 0x0c));
-        let g = meter(c.section, &c.meter, graph_h);
+        cell.fill(if light {
+            Color::from_rgba8(0, 0, 0, 0x0c)
+        } else {
+            Color::from_rgba8(0xff, 0xff, 0xff, 0x0c)
+        });
+        let g = meter(c.section, &c.meter, graph_h, taskbar);
         let stretch = cell_w as f32 / graph_h as f32;
         cell.draw_pixmap(
             0,
@@ -52,7 +63,12 @@ pub fn strip(cells: &[Cell], height: u32, scale: f32, font: Option<&FontRef>) ->
                 3.0 * scale,
                 2.0 * scale,
                 small,
-                [0xc8, 0xcd, 0xd6],
+                if light {
+                    [0x4a, 0x51, 0x60]
+                } else {
+                    [0xc8, 0xcd, 0xd6]
+                },
+                light,
             );
             let vw = measure(f, &c.value, big);
             text(
@@ -62,7 +78,12 @@ pub fn strip(cells: &[Cell], height: u32, scale: f32, font: Option<&FontRef>) ->
                 cell_w as f32 - vw - 3.0 * scale,
                 graph_h as f32 - big - 1.0 * scale,
                 big,
-                [0xff, 0xff, 0xff],
+                if light {
+                    [0x11, 0x14, 0x1a]
+                } else {
+                    [0xff, 0xff, 0xff]
+                },
+                light,
             );
         }
         img.draw_pixmap(
@@ -83,8 +104,19 @@ fn measure(font: &FontRef, s: &str, px: f32) -> f32 {
 }
 
 /// Draws `s` with its top at `y`, with a 1 px dark halo so it reads over any graph color.
-fn text(img: &mut Pixmap, font: &FontRef, s: &str, x: f32, y: f32, px: f32, rgb: [u8; 3]) {
-    for (dx, dy, c, a) in [(1.0, 1.0, [0, 0, 0], 0.7), (0.0, 0.0, rgb, 1.0)] {
+#[allow(clippy::too_many_arguments)]
+fn text(
+    img: &mut Pixmap,
+    font: &FontRef,
+    s: &str,
+    x: f32,
+    y: f32,
+    px: f32,
+    rgb: [u8; 3],
+    light: bool,
+) {
+    let halo = if light { [0xff, 0xff, 0xff] } else { [0, 0, 0] };
+    for (dx, dy, c, a) in [(1.0, 1.0, halo, 0.7), (0.0, 0.0, rgb, 1.0)] {
         let f = font.as_scaled(PxScale::from(px));
         let mut pen = x + dx;
         let baseline = y + dy + f.ascent();

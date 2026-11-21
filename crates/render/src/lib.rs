@@ -28,36 +28,49 @@ pub fn cube_root(value: f64, max: f64) -> f32 {
     (value.max(0.0) / max).cbrt().min(1.0) as f32
 }
 
-pub fn meter(section: Section, meter: &Meter, px: u32) -> Image {
+/// The taskbar the image sits on; Windows lets users pick light or dark independently of apps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Taskbar {
+    #[default]
+    Dark,
+    Light,
+}
+
+pub fn meter(section: Section, meter: &Meter, px: u32, taskbar: Taskbar) -> Image {
     let mut img = Pixmap::new(px, px).expect("non-zero size");
-    img.fill(rgba(0x20, 0x20, 0x20, 0x60));
     let h = px as f32;
     match meter {
         Meter::Level(values) => {
             for (x, &v) in tail(values, px) {
-                bar(&mut img, x, h * (1.0 - v), h, level_color(section, v));
+                bar(
+                    &mut img,
+                    x,
+                    h * (1.0 - v),
+                    h,
+                    level_color(section, v, taskbar),
+                );
             }
         }
         Meter::Duplex { down, up } => {
             let mid = h / 2.0;
             for (x, &v) in tail(down, px) {
-                bar(&mut img, x, mid * (1.0 - v), mid, base(section));
+                bar(&mut img, x, mid * (1.0 - v), mid, base(section, taskbar));
             }
             for (x, &v) in tail(up, px) {
-                bar(
-                    &mut img,
-                    x,
-                    mid,
-                    mid + mid * v,
-                    rgba(0xff, 0x9b, 0xe1, 0xff),
-                );
+                bar(&mut img, x, mid, mid + mid * v, upload(taskbar));
             }
         }
         Meter::Latency(rtts) => {
             for (x, rtt) in tail(rtts, px) {
                 match rtt {
-                    Some(v) => bar(&mut img, x, h * (1.0 - v), h, level_color(section, *v)),
-                    None => bar(&mut img, x, 0.0, h, rgba(0xff, 0x3b, 0x3b, 0xff)),
+                    Some(v) => bar(
+                        &mut img,
+                        x,
+                        h * (1.0 - v),
+                        h,
+                        level_color(section, *v, taskbar),
+                    ),
+                    None => bar(&mut img, x, 0.0, h, loss(taskbar)),
                 }
             }
         }
@@ -95,24 +108,38 @@ fn bar(img: &mut Pixmap, x: f32, top: f32, bottom: f32, color: Color) {
     }
 }
 
-fn level_color(section: Section, v: f32) -> Color {
+fn level_color(section: Section, v: f32, t: Taskbar) -> Color {
     if v >= CRIT {
         rgba(0xff, 0x5a, 0x5a, 0xff)
     } else if v >= WARN {
         rgba(0xff, 0xb3, 0x40, 0xff)
     } else {
-        base(section)
+        base(section, t)
     }
 }
 
-fn base(section: Section) -> Color {
+fn base(section: Section, t: Taskbar) -> Color {
     match section {
-        Section::Cpu => rgba(0x4f, 0xc3, 0xf7, 0xff),
-        Section::Memory => rgba(0x9c, 0xcc, 0x65, 0xff),
-        Section::Network => rgba(0x7a, 0xb8, 0xff, 0xff),
-        Section::Disk => rgba(0xb3, 0x9d, 0xdb, 0xff),
-        Section::Latency => rgba(0xff, 0xd5, 0x4f, 0xff),
+        Section::Cpu => pick(t, (0x4f, 0xc3, 0xf7), (0x02, 0x77, 0xbd)),
+        Section::Memory => pick(t, (0x9c, 0xcc, 0x65), (0x38, 0x8e, 0x3c)),
+        Section::Network => pick(t, (0x7a, 0xb8, 0xff), (0x15, 0x65, 0xc0)),
+        Section::Disk => pick(t, (0xb3, 0x9d, 0xdb), (0x5e, 0x35, 0xb1)),
+        Section::Latency => pick(t, (0xff, 0xd5, 0x4f), (0xb2, 0x6a, 0x00)),
     }
+}
+
+fn upload(t: Taskbar) -> Color {
+    pick(t, (0xff, 0x9b, 0xe1), (0xc2, 0x18, 0x5b))
+}
+
+fn loss(t: Taskbar) -> Color {
+    pick(t, (0xff, 0x3b, 0x3b), (0xc6, 0x28, 0x28))
+}
+
+/// Dark-taskbar colors are the spec tokens; light-taskbar ones are darker shades of the same hues for contrast.
+fn pick(t: Taskbar, dark: (u8, u8, u8), light: (u8, u8, u8)) -> Color {
+    let (r, g, b) = if t == Taskbar::Dark { dark } else { light };
+    rgba(r, g, b, 0xff)
 }
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
@@ -130,20 +157,30 @@ mod tests {
 
     #[test]
     fn newest_sample_is_rightmost() {
-        let img = meter(Section::Cpu, &Meter::Level(&[0.0, 0.0, 0.3]), 16);
+        let img = meter(
+            Section::Cpu,
+            &Meter::Level(&[0.0, 0.0, 0.3]),
+            16,
+            Taskbar::Dark,
+        );
         assert_eq!(pixel(&img, 15, 12), [0x4f, 0xc3, 0xf7, 0xff]);
         assert_ne!(pixel(&img, 14, 12), [0x4f, 0xc3, 0xf7, 0xff]);
     }
 
     #[test]
     fn critical_level_turns_red() {
-        let img = meter(Section::Cpu, &Meter::Level(&[0.95]), 16);
+        let img = meter(Section::Cpu, &Meter::Level(&[0.95]), 16, Taskbar::Dark);
         assert_eq!(pixel(&img, 15, 15), [0xff, 0x5a, 0x5a, 0xff]);
     }
 
     #[test]
     fn lost_probe_fills_column() {
-        let img = meter(Section::Latency, &Meter::Latency(&[None]), 16);
+        let img = meter(
+            Section::Latency,
+            &Meter::Latency(&[None]),
+            16,
+            Taskbar::Dark,
+        );
         assert_eq!(pixel(&img, 15, 0), [0xff, 0x3b, 0x3b, 0xff]);
     }
 
