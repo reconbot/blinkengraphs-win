@@ -51,56 +51,28 @@ Budget: under 1% CPU and about 30 MB RAM when idle with the Panel closed. These 
 
 ## Architecture
 
-It is a Cargo workspace. The **core crates are platform-neutral**, so they build, test and render screenshots on Linux. Only the adapter crates touch Win32.
+Platform-neutral crates build, test and render on Linux; only `collect`, `probe` and `app` call Win32 (behind `cfg(windows)` with Linux stubs).
 
 ```
 crates/
-  model/        Section, Metric, Sample, Probe, Target, Hop, Verdict types. No logic.
-  history/      Deep module: RAM ring buffer + SQLite Rollups behind one interface.
-  verdict/      Deep module: pure fn diagnose(&Snapshot) -> Verdict.
-  render/       Deep module: draw a Meter or the Strip to an RGBA image (tiny-skia).
-  panel/        egui Panel: takes a read-only view of History, Verdict and Process Snapshot.
-  config/       TOML load/save, defaults, migration.
-  collect-win/  Adapters: Metrics (PDH, GetSystemTimes, GetIfTable2, NtQuerySystemInformation).
-  probe-win/    Adapters: ICMP (IcmpSendEcho2), TCP connect (+ TTL/ICMP error info), UDP DNS.
-  surface-win/  Adapters: Tray Icons (tray-icon), Taskbar Strip (windows-rs, layered window).
-  fixtures/     Synthetic and recorded Samples/Probe results; fake adapters for tests.
-app/            blinkengraphs.exe: wiring, scheduler, power/lock handling, hotkey.
-tools/screenshots/  Renders every visual from fixtures to PNG (runs on Linux + Windows).
-spikes/tcp-hop/ M0 experiment, deleted once the decision is recorded.
+  model/     Section, Metric, Sample, Probe, Target, ProbeStat, Hop types
+  config/    TOML schema, defaults, load/save
+  history/   RAM ring + SQLite Rollups; probe stats; mtr hop rows
+  verdict/   diagnose(Input) -> Vec<Finding>
+  collect/   Collector: PDH, GetIfEntry2, NtQuerySystemInformation
+  probe/     Prober: ICMP (IcmpSendEcho2), TCP connect, UDP DNS, hop traces
+  render/    Meter and Strip images (tiny-skia, ab_glyph)
+  meters/    History + Config -> Meter/Strip images and tooltips
+  panel/     egui Panel and theme
+  fixtures/  synthetic scenarios for tests and screenshots
+app/         engine thread, Tray Icons, Taskbar Strip window, Panel window, hotkey
+tools/screenshots/  renders Meters, Strip and Panel from fixtures to PNG
 ```
 
-### Seams and interfaces
-
-**Collector** (`collect-win`, fake in `fixtures`)
-- Interface: `sample(&mut self, enabled: &MetricSet) -> Sample`.
-- Hides: PDH query handles, counter deltas, adapter following, and Process Snapshot enumeration (`snapshot_processes()`, called only while the Panel is open).
-- It's a real seam because it has two adapters: Windows and the fixture replay.
-
-**Prober** (`probe-win`, fake in `fixtures`)
-- Interface: `start(groups: Vec<ProbeGroup>) -> Receiver<ProbeResult>` and `reconfigure(...)`.
-- Hides: threads, timeouts, ICMP handle reuse, TTL sweeps for Hop Traces, Gateway discovery and DNS packet encoding.
-
-**History**
-- Interface: `record(Sample | ProbeResult)` and `series(metric_or_probe, range) -> Series`.
-- The caller never knows whether a range comes from RAM or from SQLite Rollups.
-
-**Verdict**
-- `diagnose(&Snapshot) -> Verdict`. It is pure and table-tested with fixture scenarios:
-  - Wi-Fi drop
-  - ISP loss
-  - Slow DNS
-  - ICMP filtered while TCP is fine
-  - Upload saturation
-  - CPU pinned
-
-**Renderer**
-- `render_meter(&MeterSpec, &Series, size) -> Image` and `render_strip(...)`.
-- Shared by both Surfaces and by the screenshots tool, so CI screenshots are pixel-identical to the app.
-
-**Surface** (`surface-win`)
-- Interface: `show(&[Image])` and `events() -> Receiver<SurfaceEvent>` (click, menu, anchor rect for the Panel).
-- Two adapters: Tray Icons and Taskbar Strip. The app swaps to Tray Icons when the Strip reports `Detached`.
+Seams:
+- `Collector` and `Prober` are the only adapters to the OS; the engine thread owns both and writes into `History`.
+- `verdict::diagnose` is pure and table-tested.
+- `meters` and `panel` read `History`; the same code draws the app and the CI screenshots.
 
 ## Milestones
 

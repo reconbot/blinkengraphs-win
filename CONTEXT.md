@@ -84,6 +84,10 @@ _Avoid_: systray, menu-bar item
 The Surface where all Meters sit side by side, docked inside the taskbar. When it is active, a single Menu Icon stays in the tray.
 _Avoid_: deskband, toolbar, overlay
 
+**Menu Icon**:
+The single Tray Icon kept while the Taskbar Strip is attached; it carries the right-click menu and shows the Latency Meter.
+_Avoid_: app icon
+
 **Panel**:
 The detail window that opens from any Meter or the hotkey. It shows the Verdict, history graphs, Hop Traces, and the Process Snapshot.
 _Avoid_: popup, dashboard, flyout
