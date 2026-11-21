@@ -1,4 +1,4 @@
-use model::{HopResult, Metric, Probe, ProbeResult, Sample};
+use model::{HopResult, Metric, Probe, ProbeResult, ProbeStat, Sample};
 use rusqlite::{Connection, params};
 use std::{
     collections::{HashMap, VecDeque},
@@ -29,15 +29,6 @@ pub struct Point {
     pub mean: f32,
     pub max: f32,
     pub loss: f32,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ProbeStat {
-    pub loss: f32,
-    pub rtt_ms: Option<f32>,
-    /// Median RTT over everything in RAM; what "normal" looks like.
-    pub baseline_ms: Option<f32>,
-    pub jitter_ms: Option<f32>,
 }
 
 /// One row of an mtr-style table.

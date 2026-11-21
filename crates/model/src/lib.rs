@@ -253,6 +253,15 @@ pub struct HopResult {
     pub reached: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProbeStat {
+    pub loss: f32,
+    pub rtt_ms: Option<f32>,
+    /// Median RTT over everything in RAM; what "normal" looks like.
+    pub baseline_ms: Option<f32>,
+    pub jitter_ms: Option<f32>,
+}
+
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
