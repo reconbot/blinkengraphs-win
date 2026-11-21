@@ -53,7 +53,7 @@ impl Collector {
         self.inner.sample()
     }
 
-    /// Top `limit` processes by CPU; only called while the Panel is open (ADR 0003).
+    /// Top `limit` processes by CPU plus top `limit` by memory; only called while the Panel is open (ADR 0003).
     /// CPU and disk rates are over the time since the previous call, so the first call reports zero CPU.
     pub fn processes(&mut self, limit: usize) -> Vec<ProcessRow> {
         self.inner.processes(limit)
@@ -80,7 +80,7 @@ mod smoke {
         assert!(!s.per_core.is_empty());
         let procs = c.processes(5);
         assert!(!procs.is_empty());
-        assert!(procs.len() <= 5);
+        assert!(procs.len() <= 10);
         assert!(!c.adapters().is_empty());
         eprintln!("{s:?}\n{procs:#?}\n{:#?}", c.adapters());
     }
