@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 model.workspace = true
 config.workspace = true
+palette.workspace = true
 history.workspace = true
 verdict.workspace = true
 egui = { version = "0.37", features = ["default_fonts"] }

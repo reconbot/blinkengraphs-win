@@ -11,6 +11,9 @@ use std::{
 pub struct Config {
     pub surface: Surface,
     pub menu_icon: MenuIcon,
+    pub appearance: Appearance,
+    /// Keyed by the Probe's display form, e.g. "icmp 1.1.1.1". Missing means `ProbeView::default()`.
+    pub probe_views: std::collections::BTreeMap<String, ProbeView>,
     pub sections: Vec<SectionConfig>,
     pub adapter: Adapter,
     pub system_interval_ms: u64,
@@ -28,6 +31,61 @@ pub struct Config {
 pub enum Surface {
     TrayIcons,
     TaskbarStrip,
+}
+
+/// How the Panel and the Latency Meter summarize one Probe. The Verdict ignores this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProbeView {
+    pub window_secs: u64,
+    pub aggregate: model::Aggregate,
+}
+
+impl ProbeView {
+    /// Windows that fit in the RAM history, so every aggregate is exact.
+    pub const WINDOWS: [u64; 4] = [30, 60, 300, 900];
+
+    pub fn window_label(secs: u64) -> String {
+        if secs.is_multiple_of(60) {
+            format!("{} min", secs / 60)
+        } else {
+            format!("{secs} s")
+        }
+    }
+}
+
+impl Default for ProbeView {
+    fn default() -> Self {
+        Self {
+            window_secs: 30,
+            aggregate: model::Aggregate::P50,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    /// The Panel's light or dark mode; Meters follow the taskbar instead.
+    pub mode: Mode,
+    pub preset: palette::Preset,
+    #[serde(flatten)]
+    pub overrides: palette::Overrides,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub fn palette(&self, shade: palette::Shade) -> palette::Palette {
+        palette::Palette::new(self.preset, shade, &self.overrides)
+    }
 }
 
 /// The one notification-area icon left while the Strip is attached; it opens the Panel.
@@ -332,6 +390,8 @@ impl Default for Config {
         Self {
             surface: Surface::TaskbarStrip,
             menu_icon: MenuIcon::App,
+            appearance: Appearance::default(),
+            probe_views: Default::default(),
             sections: vec![
                 all(&[CpuTotal]),
                 all(&[MemCommit]),
@@ -367,6 +427,13 @@ impl Config {
             .expect("every Section configured")
     }
 
+    pub fn probe_view(&self, p: &Probe) -> ProbeView {
+        self.probe_views
+            .get(&p.to_string())
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub fn section_mut(&mut self, s: Section) -> &mut SectionConfig {
         self.sections
             .iter_mut()
@@ -388,6 +455,10 @@ impl Config {
                 merged.absorb_legacy(g);
             }
             self.groups = vec![merged];
+        }
+        let ram = self.history.ram_minutes as u64 * 60;
+        for v in self.probe_views.values_mut() {
+            v.window_secs = v.window_secs.clamp(1, ram.max(1));
         }
         let defaults = Config::default();
         for d in defaults.sections {
@@ -597,6 +668,24 @@ mod tests {
                 Section::Latency
             ]
         );
+    }
+
+    #[test]
+    fn appearance_round_trips() {
+        let mut c = Config::default();
+        c.appearance.mode = Mode::Light;
+        c.appearance.preset = palette::Preset::ColorBlind;
+        c.appearance
+            .overrides
+            .sections
+            .insert(Section::Cpu, palette::Rgb::hex(0x123456));
+        c.appearance
+            .overrides
+            .probes
+            .insert("icmp 1.1.1.1".into(), palette::Rgb::hex(0xabcdef));
+        let text = c.to_toml();
+        assert!(text.contains("\"#123456\""), "{text}");
+        assert_eq!(Config::parse(&text).unwrap(), c);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use model::{HopResult, Metric, Probe, ProbeResult, ProbeStat, Sample};
+use model::{Aggregate, HopResult, Metric, Probe, ProbeResult, ProbeStat, Sample};
 use rusqlite::{Connection, params};
 use std::{
     collections::{HashMap, VecDeque},
@@ -42,6 +42,13 @@ pub struct Hop {
     pub best_ms: Option<f32>,
     pub avg_ms: Option<f32>,
     pub worst_ms: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Summary {
+    /// Absent when nothing replied.
+    pub value: Option<f32>,
+    pub loss: f32,
 }
 
 /// Replies kept per Hop.
@@ -180,6 +187,35 @@ impl History {
             rtt_ms: median(replies),
             baseline_ms: percentile(all, 0.1),
             jitter_ms: jitter,
+        }
+    }
+
+    /// One value for `probe` over the last `window_secs`, with the share of Probes lost.
+    pub fn aggregate(&self, probe: &Probe, window_secs: u64, agg: Aggregate) -> Summary {
+        let Some(q) = self.ram.get(&Key::Probe(probe.clone())) else {
+            return Summary::default();
+        };
+        let newest = q.back().map(|(t, _)| *t).unwrap_or(0);
+        let window: Vec<Option<f32>> = q
+            .iter()
+            .filter(|(t, _)| *t + window_secs > newest)
+            .map(|(_, v)| *v)
+            .collect();
+        let replies: Vec<f32> = window.iter().flatten().copied().collect();
+        Summary {
+            value: match agg {
+                Aggregate::P50 => median(replies),
+                Aggregate::P95 => percentile(replies, 0.95),
+                Aggregate::P99 => percentile(replies, 0.99),
+                Aggregate::Avg => (!replies.is_empty())
+                    .then(|| replies.iter().sum::<f32>() / replies.len() as f32),
+                Aggregate::Max => replies.into_iter().reduce(f32::max),
+            },
+            loss: if window.is_empty() {
+                0.0
+            } else {
+                1.0 - window.iter().flatten().count() as f32 / window.len() as f32
+            },
         }
     }
 
@@ -359,6 +395,23 @@ mod tests {
                 rtt_ms: f(t),
             });
         }
+    }
+
+    #[test]
+    fn aggregate_over_window() {
+        let mut h = History::open(None, 15, 7);
+        feed(&mut h, 1000, 1300, |t| {
+            (t % 10 != 0).then_some((t % 100) as f32)
+        });
+        let a = |agg, w| h.aggregate(&probe(), w, agg).value;
+        assert_eq!(a(Aggregate::Max, 300), Some(99.0));
+        assert_eq!(a(Aggregate::Max, 20), Some(99.0));
+        assert_eq!(a(Aggregate::Max, 5), Some(99.0));
+        assert_eq!(a(Aggregate::P50, 300), Some(51.0));
+        assert_eq!(a(Aggregate::P95, 300), Some(95.0));
+        assert_eq!(a(Aggregate::Avg, 10), Some(95.0));
+        let loss = h.aggregate(&probe(), 300, Aggregate::P50).loss;
+        assert!((loss - 0.1).abs() < 1e-6);
     }
 
     #[test]

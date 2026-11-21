@@ -1,6 +1,7 @@
 use crate::{Image, Meter, Taskbar, meter};
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use model::Section;
+use palette::Palette;
 use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Transform};
 
 pub struct Cell<'a> {
@@ -23,9 +24,9 @@ pub fn strip(
     height: u32,
     scale: f32,
     font: Option<&FontRef>,
-    taskbar: Taskbar,
+    pal: &Palette,
 ) -> Image {
-    let light = taskbar == Taskbar::Light;
+    let light = pal.shade == Taskbar::Light;
     let w = (width(cells.len()) * scale).ceil().max(1.0) as u32;
     let mut img = Pixmap::new(w, height.max(1)).expect("size");
     let cell_w = (CELL_W * scale).round() as u32;
@@ -39,7 +40,7 @@ pub fn strip(
         } else {
             Color::from_rgba8(0xff, 0xff, 0xff, 0x0c)
         });
-        let g = meter(c.section, &c.meter, graph_h, taskbar);
+        let g = meter(c.section, &c.meter, graph_h, pal);
         let stretch = cell_w as f32 / graph_h as f32;
         cell.draw_pixmap(
             0,

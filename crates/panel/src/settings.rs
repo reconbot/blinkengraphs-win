@@ -1,7 +1,9 @@
 use crate::{View, theme};
-use config::{Adapter, Config, MenuIcon, ProbeGroup, Surface, TargetRow};
+use config::{Adapter, Config, MenuIcon, Mode, ProbeGroup, ProbeView, Surface, TargetRow};
 use egui::{RichText, Ui};
+use model::Aggregate;
 use model::{Probe, Readout, Section, Target};
+use palette::{Palette, Preset, Rgb, Shade};
 
 /// Returns true when `config` changed.
 pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
@@ -29,6 +31,24 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
             })
             .response
             .on_disabled_hover_text("With Tray Icons, each Section has its own icon");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Theme");
+            let mode = &mut config.appearance.mode;
+            ui.radio_value(mode, Mode::System, "System");
+            ui.radio_value(mode, Mode::Light, "Light");
+            ui.radio_value(mode, Mode::Dark, "Dark");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Colors");
+            let preset = &mut config.appearance.preset;
+            egui::ComboBox::from_id_salt("preset")
+                .selected_text(preset.label())
+                .show_ui(ui, |ui| {
+                    for p in Preset::ALL {
+                        ui.selectable_value(preset, p, p.label());
+                    }
+                });
         });
         ui.horizontal(|ui| {
             ui.label("Panel hotkey");
@@ -103,6 +123,20 @@ fn monitor(ui: &mut Ui, config: &mut Config, section: Section) {
         .color(theme::accent(section))
         .strong();
     group(ui, title, |ui| {
+        let shade = if ui.visuals().dark_mode {
+            Shade::Dark
+        } else {
+            Shade::Light
+        };
+        let base =
+            Palette::new(config.appearance.preset, shade, &Default::default()).section(section);
+        color_row(
+            ui,
+            "Color",
+            &mut config.appearance.overrides.sections,
+            section,
+            base,
+        );
         if section == Section::Latency {
             ui.horizontal(|ui| {
                 ui.label("Probe");
@@ -140,13 +174,115 @@ fn monitor(ui: &mut Ui, config: &mut Config, section: Section) {
                 _ => toggle(ui, &mut c.panel, r),
             });
         }
+        if section == Section::Latency {
+            ui.add_space(6.0);
+            probe_views(ui, config);
+        }
     });
+}
+
+/// A color button; picking stores an override, Reset removes it.
+fn color_row<K: Ord + Clone>(
+    ui: &mut Ui,
+    label: &str,
+    overrides: &mut std::collections::BTreeMap<K, Rgb>,
+    key: K,
+    base: Rgb,
+) {
+    ui.horizontal(|ui| {
+        if !label.is_empty() {
+            ui.label(label);
+        }
+        let current = overrides.get(&key).copied().unwrap_or(base);
+        let mut rgb = [current.0, current.1, current.2];
+        if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+            overrides.insert(key.clone(), Rgb(rgb[0], rgb[1], rgb[2]));
+        }
+        if overrides.contains_key(&key) && ui.small_button("Reset").clicked() {
+            overrides.remove(&key);
+        }
+    });
+}
+
+const VIEW_WIDTHS: [f32; 4] = [0.0, 70.0, 64.0, 56.0];
+
+/// Color, window and aggregate for every latency Probe, as shown in the Panel and the Latency Meter.
+fn probe_views(ui: &mut Ui, config: &mut Config) {
+    let probes: Vec<Probe> = config
+        .groups
+        .iter()
+        .flat_map(|g| g.latency_probes())
+        .collect();
+    let shade = if ui.visuals().dark_mode {
+        Shade::Dark
+    } else {
+        Shade::Light
+    };
+    let plain = Palette::new(config.appearance.preset, shade, &Default::default());
+    crate::table_cells(ui, &VIEW_WIDTHS, false, |i, ui| {
+        let h = ["Probe", "Color", "Window", "Value"][i];
+        ui.label(RichText::new(h).small().weak());
+    });
+    for (i, p) in probes.iter().enumerate() {
+        let key = p.to_string();
+        ui.push_id(("view", i), |ui| {
+            crate::table_cells(ui, &VIEW_WIDTHS, i % 2 == 1, |c, ui| match c {
+                0 => {
+                    ui.add(egui::Label::new(&key).truncate());
+                }
+                1 => color_row(
+                    ui,
+                    "",
+                    &mut config.appearance.overrides.probes,
+                    key.clone(),
+                    plain.series(i),
+                ),
+                2 => {
+                    let mut v = config.probe_view(p);
+                    egui::ComboBox::from_id_salt("window")
+                        .width(56.0)
+                        .selected_text(ProbeView::window_label(v.window_secs))
+                        .show_ui(ui, |ui| {
+                            for w in ProbeView::WINDOWS {
+                                ui.selectable_value(
+                                    &mut v.window_secs,
+                                    w,
+                                    ProbeView::window_label(w),
+                                );
+                            }
+                        });
+                    store(config, &key, v);
+                }
+                _ => {
+                    let mut v = config.probe_view(p);
+                    egui::ComboBox::from_id_salt("aggregate")
+                        .width(44.0)
+                        .selected_text(v.aggregate.label())
+                        .show_ui(ui, |ui| {
+                            for a in Aggregate::ALL {
+                                ui.selectable_value(&mut v.aggregate, a, a.label());
+                            }
+                        });
+                    store(config, &key, v);
+                }
+            });
+        });
+    }
+}
+
+/// Default views are not written, so the TOML lists only Probes the user changed.
+fn store(config: &mut Config, key: &str, v: ProbeView) {
+    if v == ProbeView::default() {
+        config.probe_views.remove(key);
+    } else {
+        config.probe_views.insert(key.to_string(), v);
+    }
 }
 
 fn group(ui: &mut Ui, title: impl Into<RichText>, body: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
-        .fill(theme::CARD)
-        .stroke(egui::Stroke::new(1.0, theme::CARD_EDGE))
+        .fill(theme::card_fill())
+        .stroke(egui::Stroke::new(1.0, theme::card_edge()))
         .corner_radius(10.0)
         .inner_margin(10.0)
         .show(ui, |ui| {

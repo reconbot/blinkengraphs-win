@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Section {
     Cpu,
     Memory,
@@ -112,6 +112,38 @@ impl Metric {
             MemHardFaults | NetErrors => Unit::PerSec,
             DiskResponse => Unit::Millis,
             CpuQueue | DiskQueue => Unit::Count,
+        }
+    }
+}
+
+/// How a window of values is summed up into one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Aggregate {
+    #[default]
+    P50,
+    P95,
+    P99,
+    Avg,
+    Max,
+}
+
+impl Aggregate {
+    pub const ALL: [Aggregate; 5] = [
+        Aggregate::P50,
+        Aggregate::P95,
+        Aggregate::P99,
+        Aggregate::Avg,
+        Aggregate::Max,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Aggregate::P50 => "p50",
+            Aggregate::P95 => "p95",
+            Aggregate::P99 => "p99",
+            Aggregate::Avg => "avg",
+            Aggregate::Max => "max",
         }
     }
 }

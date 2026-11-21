@@ -81,7 +81,7 @@ pub fn draw(
         section,
         &series(section, h, config, shown, px as usize).meter(),
         px,
-        taskbar,
+        &config.appearance.palette(taskbar),
     )
 }
 
@@ -98,13 +98,19 @@ fn normalize(m: Metric, raw: &[Option<f32>]) -> Vec<f32> {
     }
 }
 
+/// The Latency Meter's Probe summarized as the user chose (default: median over 30 s).
+fn primary_summary(h: &History, config: &Config) -> history::Summary {
+    let v = config.probe_view(&config.primary);
+    h.aggregate(&config.primary, v.window_secs, v.aggregate)
+}
+
 fn value_text(section: Section, h: &History, config: &Config, shown: &[Readout]) -> String {
     let s = h.last_sample();
     let get = |m| s.map(|s| s.get(m)).unwrap_or(0.0);
     if section == Section::Latency {
-        let st = h.stat(&config.primary, history::RECENT_SECS);
+        let st = primary_summary(h, config);
         let loss = format!("{:.0}%", st.loss * 100.0);
-        return match (shown.contains(&Readout::Ping(Ping::Latency)), st.rtt_ms) {
+        return match (shown.contains(&Readout::Ping(Ping::Latency)), st.value) {
             (false, _) => format!("{loss} loss"),
             (true, None) => "no reply".into(),
             (true, Some(r)) if st.loss > 0.0 && shown.contains(&Readout::Ping(Ping::Loss)) => {
@@ -158,7 +164,13 @@ pub fn strip(
             meter: series.meter(),
         })
         .collect();
-    render::strip(&cells, height, scale, font, taskbar)
+    render::strip(
+        &cells,
+        height,
+        scale,
+        font,
+        &config.appearance.palette(taskbar),
+    )
 }
 
 /// The Menu Icon drawn while the Strip is attached.
@@ -170,14 +182,14 @@ pub fn menu_icon(
     taskbar: Taskbar,
 ) -> Image {
     match config.menu_icon {
-        MenuIcon::App => render::app_icon(px, taskbar, None),
+        MenuIcon::App => render::app_icon(px, &config.appearance.palette(taskbar), None),
         MenuIcon::Verdict => {
             let status = match findings.first().map(|f| f.severity) {
                 Some(verdict::Severity::Crit) => Status::Crit,
                 Some(verdict::Severity::Warn) => Status::Warn,
                 _ => Status::Ok,
             };
-            render::app_icon(px, taskbar, Some(status))
+            render::app_icon(px, &config.appearance.palette(taskbar), Some(status))
         }
         MenuIcon::Meter(section) => {
             let c = config.section(section);
@@ -222,12 +234,18 @@ pub fn tooltip(
             get(Metric::DiskResponse)
         ),
         Section::Latency => {
-            let st = h.stat(&config.primary, history::RECENT_SECS);
+            let st = primary_summary(h, config);
+            let v = config.probe_view(&config.primary);
             let rtt = st
-                .rtt_ms
-                .map(|r| format!("{r:.0} ms"))
+                .value
+                .map(|r| format!("{} {r:.0} ms", v.aggregate.label()))
                 .unwrap_or("no reply".into());
-            format!("{} {rtt}  {:.0}% loss", config.primary, st.loss * 100.0)
+            format!(
+                "{} {rtt}  {:.0}% loss over {}",
+                config.primary,
+                st.loss * 100.0,
+                config::ProbeView::window_label(v.window_secs)
+            )
         }
     };
     let headline = findings.first().map(|f| f.headline.as_str()).unwrap_or("");

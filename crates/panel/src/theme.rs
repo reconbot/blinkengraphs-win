@@ -1,8 +1,11 @@
+use config::{Appearance, Mode};
 use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Frame, Margin, Stroke, Ui,
     Visuals,
 };
-use model::Section;
+use model::{Probe, Section};
+use palette::{Palette, Preset, Rgb, Shade};
+use std::cell::RefCell;
 use verdict::Severity;
 
 trait Pipe: Sized {
@@ -12,50 +15,72 @@ trait Pipe: Sized {
 }
 impl<T> Pipe for T {}
 
-pub const BG: Color32 = Color32::from_rgb(0x12, 0x15, 0x1c);
-pub const CARD: Color32 = Color32::from_rgb(0x1b, 0x20, 0x2a);
-pub const CARD_EDGE: Color32 = Color32::from_rgb(0x2a, 0x31, 0x3d);
-pub const TEXT: Color32 = Color32::from_rgb(0xe6, 0xea, 0xf0);
-pub const TEXT_WEAK: Color32 = Color32::from_rgb(0x8b, 0x95, 0xa5);
-pub const OK: Color32 = Color32::from_rgb(0x4a, 0xde, 0x80);
-pub const WARN: Color32 = Color32::from_rgb(0xff, 0xb3, 0x40);
-pub const CRIT: Color32 = Color32::from_rgb(0xff, 0x5a, 0x5a);
-pub const UPLOAD: Color32 = Color32::from_rgb(0xff, 0x9b, 0xe1);
-
-/// Same hues as the Meters (crates/render) so a Tray Icon and its Panel card read as one thing.
-pub fn accent(s: Section) -> Color32 {
-    match s {
-        Section::Cpu => Color32::from_rgb(0x4f, 0xc3, 0xf7),
-        Section::Memory => Color32::from_rgb(0x9c, 0xcc, 0x65),
-        Section::Network => Color32::from_rgb(0x7a, 0xb8, 0xff),
-        Section::Disk => Color32::from_rgb(0xb3, 0x9d, 0xdb),
-        Section::Latency => Color32::from_rgb(0xff, 0xd5, 0x4f),
-    }
+thread_local! {
+    static PAL: RefCell<Palette> = RefCell::new(Palette::new(
+        Preset::Default,
+        Shade::Dark,
+        &Default::default(),
+    ));
 }
 
+fn with<R>(f: impl FnOnce(&Palette) -> R) -> R {
+    PAL.with(|p| f(&p.borrow()))
+}
+
+pub fn color(c: Rgb) -> Color32 {
+    Color32::from_rgb(c.0, c.1, c.2)
+}
+
+pub fn bg() -> Color32 {
+    with(|p| color(p.bg))
+}
+pub fn card_fill() -> Color32 {
+    with(|p| color(p.card))
+}
+pub fn card_edge() -> Color32 {
+    with(|p| color(p.card_edge))
+}
+pub fn text() -> Color32 {
+    with(|p| color(p.text))
+}
+pub fn text_weak() -> Color32 {
+    with(|p| color(p.text_weak))
+}
+pub fn ok() -> Color32 {
+    with(|p| color(p.ok))
+}
+pub fn warn() -> Color32 {
+    with(|p| color(p.warn))
+}
+pub fn crit() -> Color32 {
+    with(|p| color(p.crit))
+}
+pub fn upload() -> Color32 {
+    with(|p| color(p.upload))
+}
 pub fn faint() -> Color32 {
-    Color32::from_rgb(0x20, 0x26, 0x31)
+    with(|p| color(p.faint))
+}
+
+/// Same colors as the Meters so a Tray Icon and its Panel card read as one thing.
+pub fn accent(s: Section) -> Color32 {
+    with(|p| color(p.section(s)))
 }
 
 pub fn series(i: usize) -> Color32 {
-    const P: [Color32; 8] = [
-        Color32::from_rgb(0xff, 0xd5, 0x4f),
-        Color32::from_rgb(0x4f, 0xc3, 0xf7),
-        Color32::from_rgb(0xf4, 0x8f, 0xb1),
-        Color32::from_rgb(0x9c, 0xcc, 0x65),
-        Color32::from_rgb(0xb3, 0x9d, 0xdb),
-        Color32::from_rgb(0xff, 0x8a, 0x65),
-        Color32::from_rgb(0x4d, 0xd0, 0xe1),
-        Color32::from_rgb(0xe0, 0xe0, 0xe0),
-    ];
-    P[i % P.len()]
+    with(|p| color(p.series(i)))
+}
+
+/// The user's color for `probe`, else the `i`th series color.
+pub fn probe(probe: &Probe, i: usize) -> Color32 {
+    with(|p| color(p.probe(&probe.to_string(), i)))
 }
 
 pub fn level(s: Section, v: f32) -> Color32 {
     if v >= 0.85 {
-        CRIT
+        crit()
     } else if v >= 0.6 {
-        WARN
+        warn()
     } else {
         accent(s)
     }
@@ -63,20 +88,20 @@ pub fn level(s: Section, v: f32) -> Color32 {
 
 pub fn severity_color(s: Severity) -> Color32 {
     match s {
-        Severity::Ok => OK,
-        Severity::Warn => WARN,
-        Severity::Crit => CRIT,
+        Severity::Ok => ok(),
+        Severity::Warn => warn(),
+        Severity::Crit => crit(),
     }
 }
 
 pub fn window_frame() -> Frame {
-    Frame::new().fill(BG).inner_margin(Margin::same(14))
+    Frame::new().fill(bg()).inner_margin(Margin::same(14))
 }
 
 pub fn card(ui: &mut Ui, s: Section, body: impl FnOnce(&mut Ui)) {
     Frame::new()
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, CARD_EDGE))
+        .fill(card_fill())
+        .stroke(Stroke::new(1.0, card_edge()))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {
@@ -118,21 +143,63 @@ pub fn install(ctx: &egui::Context) {
     }
     ctx.set_fonts(fonts);
 
-    let mut v = Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = BG;
-    v.extreme_bg_color = Color32::from_rgb(0x0e, 0x11, 0x16);
-    v.faint_bg_color = Color32::from_rgb(0x20, 0x26, 0x31);
-    v.override_text_color = Some(TEXT);
-    v.selection.bg_fill = Color32::from_rgb(0x2b, 0x5b, 0x8a);
-    v.widgets.inactive.corner_radius = CornerRadius::same(6);
-    v.widgets.hovered.corner_radius = CornerRadius::same(6);
-    v.widgets.active.corner_radius = CornerRadius::same(6);
-    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(0x22, 0x28, 0x33);
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.set_visuals_of(egui::Theme::Dark, v);
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
     });
+    apply(ctx, &Appearance::default());
+}
+
+/// Rebuilds colors and visuals when the Appearance or Windows' app theme changes.
+pub fn apply(ctx: &egui::Context, a: &Appearance) {
+    let shade = match a.mode {
+        Mode::Light => Shade::Light,
+        Mode::Dark => Shade::Dark,
+        Mode::System => match ctx.system_theme() {
+            Some(egui::Theme::Light) => Shade::Light,
+            _ => Shade::Dark,
+        },
+    };
+    let pal = a.palette(shade);
+    let id = egui::Id::unique("blinkengraphs-palette");
+    PAL.with(|p| *p.borrow_mut() = pal.clone());
+    if ctx.data(|d| d.get_temp::<Palette>(id)).as_ref() == Some(&pal) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, pal.clone()));
+    let light = shade == Shade::Light;
+    let mut v = if light {
+        Visuals::light()
+    } else {
+        Visuals::dark()
+    };
+    v.panel_fill = color(pal.bg);
+    v.window_fill = color(pal.bg);
+    v.extreme_bg_color = color(pal.field);
+    v.faint_bg_color = color(pal.faint);
+    v.override_text_color = Some(color(pal.text));
+    v.selection.bg_fill = if light {
+        Color32::from_rgb(0xb3, 0xd4, 0xf5)
+    } else {
+        Color32::from_rgb(0x2b, 0x5b, 0x8a)
+    };
+    for w in [
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+    ] {
+        w.corner_radius = CornerRadius::same(6);
+    }
+    v.widgets.inactive.weak_bg_fill = if light {
+        Color32::from_rgb(0xe4, 0xe7, 0xec)
+    } else {
+        Color32::from_rgb(0x22, 0x28, 0x33)
+    };
+    let theme = if light {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    ctx.set_visuals_of(theme, v);
+    ctx.set_theme(theme);
 }
