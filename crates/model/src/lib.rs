@@ -145,6 +145,7 @@ pub struct ProcessRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum Target {
     Gateway,
     SystemResolver,
@@ -156,7 +157,7 @@ impl std::fmt::Display for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Target::Gateway => f.write_str("gateway"),
-            Target::SystemResolver => f.write_str("system DNS"),
+            Target::SystemResolver => f.write_str("system-dns"),
             Target::Addr(a) => write!(f, "{a}"),
             Target::Host(h) => f.write_str(h),
         }
@@ -164,6 +165,7 @@ impl std::fmt::Display for Target {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum Protocol {
     Icmp,
     Tcp(u16),
@@ -174,9 +176,49 @@ pub enum Protocol {
 impl std::fmt::Display for Protocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Protocol::Icmp => f.write_str("ICMP"),
-            Protocol::Tcp(p) => write!(f, "TCP {p}"),
-            Protocol::Dns => f.write_str("DNS"),
+            Protocol::Icmp => f.write_str("icmp"),
+            Protocol::Tcp(p) => write!(f, "tcp:{p}"),
+            Protocol::Dns => f.write_str("dns"),
+        }
+    }
+}
+
+impl From<Target> for String {
+    fn from(t: Target) -> String {
+        t.to_string()
+    }
+}
+
+impl TryFrom<String> for Target {
+    type Error = std::convert::Infallible;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Ok(match s.as_str() {
+            "gateway" => Target::Gateway,
+            "system-dns" => Target::SystemResolver,
+            _ => s.parse().map(Target::Addr).unwrap_or(Target::Host(s)),
+        })
+    }
+}
+
+impl From<Protocol> for String {
+    fn from(p: Protocol) -> String {
+        p.to_string()
+    }
+}
+
+impl TryFrom<String> for Protocol {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "icmp" => Ok(Protocol::Icmp),
+            "dns" => Ok(Protocol::Dns),
+            _ => s
+                .strip_prefix("tcp:")
+                .and_then(|p| p.parse().ok())
+                .map(Protocol::Tcp)
+                .ok_or(format!(
+                    "unknown protocol {s:?}; expected icmp, dns or tcp:<port>"
+                )),
         }
     }
 }
