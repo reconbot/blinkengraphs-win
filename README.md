@@ -56,9 +56,9 @@ Tray Icons (actual size, then 4× zoom):
   - Per displayed Probe: time window and aggregate (p99, p95, p50, avg, max)
   - Graph aggregate for all graphs (same choices)
 - [ ] **M3: Distribution.**
-  - Code signing with Azure Artifact Signing, so browsers and SmartScreen stop blocking downloads ([ADR 0009](docs/adr/0009-azure-artifact-signing.md))
-  - Dual-mode MSI: per-user without admin, or per-machine; deploys through Intune ([ADR 0010](docs/adr/0010-dual-mode-wix-msi.md))
+  - One MSI for per-user (no admin) or per-machine installs, interactive or `msiexec` switches, deployable through Intune; per-machine installs add the M4 service ([ADR 0010](docs/adr/0010-single-dual-mode-msi.md))
   - Autostart
+- [ ] **Later: code signing** with Azure Artifact Signing ([ADR 0009](docs/adr/0009-azure-artifact-signing.md), deferred)
 - [ ] **M4: Elevated Extras.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md))
 
 ## Repositories
