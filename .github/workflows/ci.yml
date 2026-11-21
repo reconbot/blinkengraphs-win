@@ -51,6 +51,12 @@ jobs:
             echo "## tcp-hop spike (ADR 0002)"
             ./target/${{ matrix.target }}/release/tcp-hop.exe 1.1.1.1 443 15
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: size budget (ADR 0007)
+        shell: bash
+        run: |
+          size=$(stat -c %s target/${{ matrix.target }}/release/blinkengraphs.exe)
+          echo "blinkengraphs.exe (${{ matrix.target }}): $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$size" -le 7340032
       - if: matrix.target == 'x86_64-pc-windows-msvc'
         name: footprint
         shell: bash
