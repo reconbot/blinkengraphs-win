@@ -33,6 +33,10 @@ pub fn accent(s: Section) -> Color32 {
     }
 }
 
+pub fn faint() -> Color32 {
+    Color32::from_rgb(0x20, 0x26, 0x31)
+}
+
 pub fn series(i: usize) -> Color32 {
     const P: [Color32; 8] = [
         Color32::from_rgb(0xff, 0xd5, 0x4f),

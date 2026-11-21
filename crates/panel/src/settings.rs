@@ -1,45 +1,48 @@
 use crate::{View, theme};
-use config::{Adapter, Config, ProbeGroup, Surface};
+use config::{Adapter, Config, MenuIcon, ProbeGroup, Surface, TargetRow};
 use egui::{RichText, Ui};
-use model::{Metric, Probe, Protocol, Section, Target};
+use model::{Probe, Readout, Section, Target};
 
 /// Returns true when `config` changed.
 pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
     let before = config.clone();
 
-    group(ui, "Display", |ui| {
+    group(ui, "General", |ui| {
         ui.horizontal(|ui| {
-            ui.label("Surface");
+            ui.label("Taskbar display");
+            ui.radio_value(&mut config.surface, Surface::TaskbarStrip, "Strip");
             ui.radio_value(&mut config.surface, Surface::TrayIcons, "Tray Icons");
-            ui.radio_value(&mut config.surface, Surface::TaskbarStrip, "Taskbar Strip");
         });
-        egui::Grid::new("metrics")
-            .num_columns(4)
-            .spacing([14.0, 4.0])
-            .show(ui, |ui| {
-                for h in ["Section / Metric", "Visible", "Meter", "Strip"] {
-                    ui.label(RichText::new(h).small().weak());
-                }
-                ui.end_row();
-                for section in Section::ALL {
-                    let c = config.section_mut(section);
-                    ui.label(
-                        RichText::new(section.label())
-                            .color(theme::accent(section))
-                            .strong(),
-                    );
-                    ui.checkbox(&mut c.visible, "");
-                    ui.end_row();
-                    for m in Metric::ALL.into_iter().filter(|m| m.section() == section) {
-                        ui.label(format!("   {}", m.label()));
-                        ui.label("");
-                        toggle(ui, &mut c.meter, m);
-                        toggle(ui, &mut c.strip, m);
-                        ui.end_row();
-                    }
-                }
-            });
+        ui.add_enabled_ui(config.surface == Surface::TaskbarStrip, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Tray icon");
+                egui::ComboBox::from_id_salt("menu_icon")
+                    .selected_text(config.menu_icon.label())
+                    .show_ui(ui, |ui| {
+                        let choices = [MenuIcon::App, MenuIcon::Verdict]
+                            .into_iter()
+                            .chain(Section::ALL.map(MenuIcon::Meter));
+                        for m in choices {
+                            ui.selectable_value(&mut config.menu_icon, m, m.label());
+                        }
+                    });
+            })
+            .response
+            .on_disabled_hover_text("With Tray Icons, each Section has its own icon");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Panel hotkey");
+            ui.text_edit_singleline(&mut config.hotkey);
+        });
+        ui.checkbox(
+            &mut config.pause_when_idle,
+            "Pause while locked or screen saver running",
+        );
     });
+
+    for section in Section::ALL {
+        ui.push_id(("monitor", section), |ui| monitor(ui, config, section));
+    }
 
     group(ui, "Sampling", |ui| {
         interval(ui, "System metrics", &mut config.system_interval_ms);
@@ -47,10 +50,6 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
             ui,
             "Process list (Panel open)",
             &mut config.process_interval_ms,
-        );
-        ui.checkbox(
-            &mut config.pause_when_idle,
-            "Pause while locked or screen saver running",
         );
         ui.horizontal(|ui| {
             ui.label("Network adapter");
@@ -71,71 +70,80 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
                     }
                 });
         });
-        ui.horizontal(|ui| {
-            ui.label("Panel hotkey");
-            ui.text_edit_singleline(&mut config.hotkey);
-        });
-    });
-
-    group(ui, "Latency Meter", |ui| {
-        let all: Vec<Probe> = config
-            .groups
-            .iter()
-            .flat_map(|g| g.probes.iter().cloned())
-            .collect();
-        egui::ComboBox::from_id_salt("primary")
-            .selected_text(config.primary.to_string())
-            .show_ui(ui, |ui| {
-                for p in all {
-                    let label = p.to_string();
-                    ui.selectable_value(&mut config.primary, p, label);
-                }
-            });
     });
 
     let mut remove_group = None;
     for (gi, g) in config.groups.iter_mut().enumerate() {
-        group(ui, &format!("Probe Group · {}", g.name), |ui| {
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut g.enabled, "Enabled");
-                interval(ui, "every", &mut g.interval_ms);
-                if ui.small_button("Remove group").clicked() {
-                    remove_group = Some(gi);
-                }
+        ui.push_id(("group", gi), |ui| {
+            group(ui, "Probe Group", |ui| {
+                probe_group(ui, g, &mut remove_group, gi)
             });
-            probe_list(
-                ui,
-                ("p", gi),
-                "Probes",
-                &mut g.probes,
-                &["icmp", "tcp:443", "tcp:80", "dns"],
-            );
-            probe_list(
-                ui,
-                ("t", gi),
-                "Hop Traces",
-                &mut g.traces,
-                &["icmp", "tcp:443"],
-            );
         });
     }
     if let Some(i) = remove_group {
         config.groups.remove(i);
     }
     if ui.button("Add Probe Group").clicked() {
-        config.groups.push(ProbeGroup {
-            name: format!("Group {}", config.groups.len() + 1),
-            enabled: true,
-            interval_ms: 1000,
-            probes: vec![],
-            traces: vec![],
-        });
+        let n = config.groups.len() + 1;
+        let mut row = TargetRow::new(Target::from("1.1.1.1".to_string()));
+        row.icmp = true;
+        config
+            .groups
+            .push(ProbeGroup::new(format!("Group {n}"), vec![row]));
     }
 
     *config != before
 }
 
-fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
+const MONITOR_WIDTHS: [f32; 4] = [0.0, 44.0, 44.0, 44.0];
+
+/// One card per Section: which Readouts each Surface shows.
+fn monitor(ui: &mut Ui, config: &mut Config, section: Section) {
+    let title = RichText::new(section.label())
+        .color(theme::accent(section))
+        .strong();
+    group(ui, title, |ui| {
+        if section == Section::Latency {
+            ui.horizontal(|ui| {
+                ui.label("Probe");
+                let all: Vec<Probe> = config
+                    .groups
+                    .iter()
+                    .flat_map(|g| g.latency_probes())
+                    .collect();
+                egui::ComboBox::from_id_salt("primary")
+                    .selected_text(config.primary.to_string())
+                    .show_ui(ui, |ui| {
+                        for p in all {
+                            let label = p.to_string();
+                            ui.selectable_value(&mut config.primary, p, label);
+                        }
+                    });
+            });
+        }
+        crate::table_cells(ui, &MONITOR_WIDTHS, false, |i, ui| {
+            let h = ["", "Tray", "Strip", "Panel"][i];
+            ui.label(RichText::new(h).small().weak());
+        });
+        let c = config.section_mut(section);
+        for (ri, r) in Readout::ALL
+            .into_iter()
+            .filter(|r| r.section() == section)
+            .enumerate()
+        {
+            crate::table_cells(ui, &MONITOR_WIDTHS, ri % 2 == 1, |i, ui| match i {
+                0 => {
+                    ui.label(r.label());
+                }
+                1 => toggle(ui, &mut c.tray, r),
+                2 => toggle(ui, &mut c.strip, r),
+                _ => toggle(ui, &mut c.panel, r),
+            });
+        }
+    });
+}
+
+fn group(ui: &mut Ui, title: impl Into<RichText>, body: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(theme::CARD)
         .stroke(egui::Stroke::new(1.0, theme::CARD_EDGE))
@@ -143,19 +151,19 @@ fn group(ui: &mut Ui, title: &str, body: impl FnOnce(&mut Ui)) {
         .inner_margin(10.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(title).strong());
+            ui.label(title.into().strong());
             ui.add_space(4.0);
             body(ui);
         });
     ui.add_space(8.0);
 }
 
-fn toggle(ui: &mut Ui, list: &mut Vec<Metric>, m: Metric) {
+fn toggle(ui: &mut Ui, list: &mut Vec<Readout>, m: Readout) {
     let mut on = list.contains(&m);
-    if ui.checkbox(&mut on, "").changed() {
+    if ui.add(egui::Checkbox::without_text(&mut on)).changed() {
         if on {
             list.push(m);
-            list.sort_by_key(|x| Metric::ALL.iter().position(|y| y == x));
+            list.sort_by_key(|x| Readout::ALL.iter().position(|y| y == x));
         } else {
             list.retain(|x| *x != m);
         }
@@ -180,50 +188,91 @@ fn interval(ui: &mut Ui, label: &str, ms: &mut u64) {
     });
 }
 
-fn probe_list(
-    ui: &mut Ui,
-    id: (&str, usize),
-    title: &str,
-    probes: &mut Vec<Probe>,
-    protocols: &[&str],
-) {
-    ui.label(RichText::new(title).small().weak());
+const WIDTHS: [f32; 7] = [0.0, 32.0, 52.0, 52.0, 30.0, 34.0, 16.0];
+
+fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>, gi: usize) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut g.name).desired_width(160.0));
+        ui.checkbox(&mut g.enabled, "Enabled");
+        if ui.small_button("Remove group").clicked() {
+            *remove_group = Some(gi);
+        }
+    });
+    ui.horizontal(|ui| {
+        interval(ui, "Latency every", &mut g.latency_ms);
+        interval(ui, "DNS", &mut g.dns_ms);
+        interval(ui, "Trace", &mut g.trace_ms);
+    });
+    ui.add_space(4.0);
+    crate::table_cells(ui, &WIDTHS, false, |i, ui| {
+        let h = ["Target", "ICMP", "TCP", "UDP", "DNS", "Trace", ""][i];
+        let label = ui.label(RichText::new(h).small().weak());
+        if i == 3 {
+            label.on_hover_text(
+                "A closed port works: the host answers port-unreachable. Try 33434.",
+            );
+        }
+    });
     let mut remove = None;
-    for (i, p) in probes.iter_mut().enumerate() {
-        ui.push_id((id, i), |ui| {
-            ui.horizontal(|ui| {
-                let mut proto = p.protocol.to_string();
-                egui::ComboBox::from_id_salt("proto")
-                    .width(70.0)
-                    .selected_text(&proto)
-                    .show_ui(ui, |ui| {
-                        for o in protocols {
-                            ui.selectable_value(&mut proto, o.to_string(), *o);
-                        }
-                    });
-                if let Ok(np) = Protocol::try_from(proto) {
-                    p.protocol = np;
+    for (ri, row) in g.targets.iter_mut().enumerate() {
+        ui.push_id(ri, |ui| {
+            let traceable = !matches!(row.target, Target::Gateway | Target::SystemResolver);
+            crate::table_cells(ui, &WIDTHS, ri % 2 == 1, |i, ui| match i {
+                0 => {
+                    let mut text = row.target.to_string();
+                    if ui
+                        .add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY))
+                        .changed()
+                    {
+                        row.target = Target::from(text);
+                    }
                 }
-                let mut target = p.target.to_string();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut target).desired_width(150.0))
-                    .changed()
-                {
-                    p.target = Target::from(target);
+                1 => {
+                    ui.add(egui::Checkbox::without_text(&mut row.icmp));
                 }
-                if ui.small_button("Remove").clicked() {
-                    remove = Some(i);
+                2 => port(ui, &mut row.tcp),
+                3 => port(ui, &mut row.udp),
+                4 => {
+                    ui.add(egui::Checkbox::without_text(&mut row.dns));
+                }
+                5 => {
+                    ui.add_enabled(traceable, egui::Checkbox::without_text(&mut row.trace))
+                        .on_disabled_hover_text("Hop traces need an internet target");
+                }
+                _ => {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Remove target")
+                        .clicked()
+                    {
+                        remove = Some(ri);
+                    }
                 }
             });
         });
     }
     if let Some(i) = remove {
-        probes.remove(i);
+        g.targets.remove(i);
     }
-    if ui.small_button("+ Add").clicked() {
-        probes.push(Probe {
-            target: Target::from("1.1.1.1".to_string()),
-            protocol: Protocol::Icmp,
-        });
+    if ui.small_button("+ Add target").clicked() {
+        let mut row = TargetRow::new(Target::from("example.com".to_string()));
+        row.icmp = true;
+        g.targets.push(row);
+    }
+}
+
+/// Empty means off.
+fn port(ui: &mut Ui, value: &mut Option<u16>) {
+    let mut text = value.map(|p| p.to_string()).unwrap_or_default();
+    let edit = egui::TextEdit::singleline(&mut text)
+        .hint_text("off")
+        .desired_width(f32::INFINITY)
+        .align(egui::Align2::RIGHT_CENTER);
+    if ui.add(edit).changed() {
+        match text.trim().parse::<u16>() {
+            Ok(p) if p > 0 => *value = Some(p),
+            _ if text.trim().is_empty() => *value = None,
+            _ => {}
+        }
     }
 }

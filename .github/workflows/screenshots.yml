@@ -13,23 +13,17 @@ env:
 
 jobs:
   render:
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: screenshots
-      # Lavapipe: software Vulkan so wgpu can render headless on a runner without a GPU.
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -yq mesa-vulkan-drivers
       - run: cargo run --release -p screenshots -- out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: screenshots-${{ runner.os }}
+          name: screenshots
           path: out/
 
   publish:
@@ -42,32 +36,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: screenshots-Windows
+          name: screenshots
           path: out
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: screenshots-Linux
-          path: linux
-      - name: Compare Windows and Linux renders
-        run: |
-          sudo apt-get install -yq python3-pil >/dev/null
-          python3 - <<'PY' > compare.md
-          from pathlib import Path
-          from PIL import Image, ImageChops
-          print("| Image | Pixels differing (Windows vs Linux) | Max channel delta |\n|---|---|---|")
-          for w in sorted(Path("out").glob("*.png")):
-              l = Path("linux") / w.name
-              if not l.exists():
-                  print(f"| {w.name} | missing on Linux | |"); continue
-              a, b = Image.open(w).convert("RGBA"), Image.open(l).convert("RGBA")
-              if a.size != b.size:
-                  print(f"| {w.name} | size {a.size} vs {b.size} | |"); continue
-              d = ImageChops.difference(a, b)
-              changed = sum(1 for px in d.getdata() if any(px))
-              pct = 100 * changed / (a.size[0] * a.size[1])
-              print(f"| {w.name} | {pct:.2f}% | {max(max(px) for px in d.getdata())} |")
-          PY
-          cat compare.md
       - name: Push to ci-screenshots branch
         env:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -84,7 +54,6 @@ jobs:
           git push -q origin HEAD:ci-screenshots
           prefix="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/$SHA/"
           sed "s#](\([^)]*\.png\))#](${prefix}\1)#" ../out/index.md > ../index.md
-          { echo; echo "### Windows vs Linux render"; cat ../compare.md; } >> ../index.md
           { echo "## Screenshots"; cat ../index.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9

@@ -143,8 +143,15 @@ impl ProcTracker {
                 .total_cmp(&a.cpu_pct)
                 .then(b.memory_bytes.cmp(&a.memory_bytes))
         });
-        rows.truncate(limit);
-        rows
+        // Union of the top `limit` by CPU and by memory, so a large idle process still reaches the Panel.
+        let mut keep: Vec<ProcessRow> = rows.iter().take(limit).cloned().collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.memory_bytes));
+        for r in rows.into_iter().take(limit) {
+            if !keep.iter().any(|k| k.pid == r.pid) {
+                keep.push(r);
+            }
+        }
+        keep
     }
 }
 
@@ -267,6 +274,32 @@ mod tests {
         );
         assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), [2, 1]);
         assert!(rows.iter().all(|r| r.cpu_pct == 0.0 && r.disk_bps == 0.0));
+    }
+
+    #[test]
+    fn processes_keep_top_memory_users_even_when_idle() {
+        let mut t = ProcTracker::default();
+        t.update(
+            vec![
+                proc(1, 0, 0, 0, 10),
+                proc(2, 0, 0, 0, 10),
+                proc(3, 0, 0, 0, 9_000),
+            ],
+            0,
+            1.0,
+            1,
+        );
+        let rows = t.update(
+            vec![
+                proc(1, 0, 500, 0, 10),
+                proc(2, 0, 100, 0, 10),
+                proc(3, 0, 0, 0, 9_000),
+            ],
+            1000,
+            1.0,
+            1,
+        );
+        assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), [1, 3]);
     }
 
     #[test]

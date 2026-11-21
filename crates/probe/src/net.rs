@@ -25,12 +25,40 @@ pub fn tcp(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
     }
 }
 
-pub fn dns(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+/// On a connected UDP socket an ICMP port-unreachable surfaces as a reset (Windows) or refused (Unix)
+/// on the next receive, which proves the host is up. Silence is loss: an open port that never replies
+/// is indistinguishable from a dropped packet.
+pub fn udp(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+    let socket = bound(addr)?;
+    socket.connect(addr).ok()?;
+    socket.set_read_timeout(Some(timeout)).ok()?;
+    let start = Instant::now();
+    socket.send(b"blinkengraphs").ok()?;
+    let mut buf = [0u8; 512];
+    match socket.recv(&mut buf) {
+        Ok(_) => Some(start.elapsed()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Some(start.elapsed())
+        }
+        Err(_) => None,
+    }
+}
+
+fn bound(addr: SocketAddr) -> Option<UdpSocket> {
     let local: IpAddr = match addr {
         SocketAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
         SocketAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
     };
-    let socket = UdpSocket::bind((local, 0)).ok()?;
+    UdpSocket::bind((local, 0)).ok()
+}
+
+pub fn dns(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+    let socket = bound(addr)?;
     socket.connect(addr).ok()?;
     let id = random_u16();
     let query = dns::encode_query(id, dns::QUERY_NAME);
@@ -70,6 +98,31 @@ mod tests {
     use std::net::TcpListener;
 
     const T: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn udp_echo_counts_as_reply() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let echo = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let (n, from) = server.recv_from(&mut buf).unwrap();
+            server.send_to(&buf[..n], from).unwrap();
+        });
+        assert!(udp(addr, T).is_some());
+        echo.join().unwrap();
+    }
+
+    #[test]
+    fn udp_closed_port_counts_as_reply() {
+        let closed = UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert!(
+            udp(closed, T).is_some(),
+            "port unreachable should prove the host answered"
+        );
+    }
 
     #[test]
     fn tcp_reply_from_listener() {

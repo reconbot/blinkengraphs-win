@@ -8,6 +8,11 @@ on:
         description: Existing release tag to rebuild and upload exes to
         required: true
 
+# Never cancel: a cancelled run can leave a release without its exes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write

@@ -1,52 +1,87 @@
-use config::Config;
+use config::{Config, MenuIcon, SectionConfig};
 use history::{History, Key};
-use model::{Metric, Section, Unit};
-use render::{Cell, FontRef, Image, Meter, cube_root, meter};
+use model::{Metric, Ping, Readout, Section, Unit};
+use render::{Cell, FontRef, Image, Meter, Status, Taskbar, cube_root, meter};
 
-/// Draws one Section's Meter at `px` from the last `px` samples, per the Section's configured Metrics.
-pub fn draw(section: Section, h: &History, config: &Config, metrics: &[Metric], px: u32) -> Image {
-    let n = px as usize;
-    match section {
-        Section::Latency => {
-            let raw = h.recent(&Key::Probe(config.primary.clone()), n);
-            let baseline = h
-                .stat(&config.primary, history::RECENT_SECS)
-                .baseline_ms
-                .unwrap_or(20.0);
-            let scale = (baseline * 4.0).max(100.0);
-            let v: Vec<Option<f32>> = raw
-                .into_iter()
-                .map(|r| r.map(|ms| (ms / scale).min(1.0)))
-                .collect();
-            meter(section, &Meter::Latency(&v), px)
-        }
-        Section::Network
-            if metrics.contains(&Metric::NetDown) && metrics.contains(&Metric::NetUp) =>
-        {
-            let down = h.recent(&Key::Metric(Metric::NetDown), n);
-            let up = h.recent(&Key::Metric(Metric::NetUp), n);
-            let max = down
-                .iter()
-                .chain(&up)
-                .flatten()
-                .fold(1e6f32, |a, b| a.max(*b)) as f64;
-            let norm = |v: Vec<Option<f32>>| {
-                v.into_iter()
-                    .map(|x| cube_root(x.unwrap_or(0.0) as f64, max))
-                    .collect::<Vec<_>>()
-            };
-            let (d, u) = (norm(down), norm(up));
-            meter(section, &Meter::Duplex { down: &d, up: &u }, px)
-        }
-        _ => {
-            let Some(&m) = metrics.first() else {
-                return meter(section, &Meter::Level(&[]), px);
-            };
-            let raw = h.recent(&Key::Metric(m), n);
-            let v = normalize(m, &raw);
-            meter(section, &Meter::Level(&v), px)
+/// Meter data a Section draws from, owned so a Strip can borrow many at once.
+enum Series {
+    Level(Vec<f32>),
+    Duplex(Vec<f32>, Vec<f32>),
+    Latency(Vec<Option<f32>>),
+    Loss(Vec<bool>),
+}
+
+impl Series {
+    fn meter(&self) -> Meter<'_> {
+        match self {
+            Series::Level(v) => Meter::Level(v),
+            Series::Duplex(down, up) => Meter::Duplex { down, up },
+            Series::Latency(v) => Meter::Latency(v),
+            Series::Loss(v) => Meter::Loss(v),
         }
     }
+}
+
+fn series(section: Section, h: &History, config: &Config, shown: &[Readout], n: usize) -> Series {
+    if section == Section::Latency {
+        let raw = h.recent(&Key::Probe(config.primary.clone()), n);
+        let latency = shown.contains(&Readout::Ping(Ping::Latency));
+        let loss = shown.contains(&Readout::Ping(Ping::Loss));
+        if !latency {
+            return Series::Loss(raw.iter().map(|r| loss && r.is_none()).collect());
+        }
+        let baseline = h
+            .stat(&config.primary, history::RECENT_SECS)
+            .baseline_ms
+            .unwrap_or(20.0);
+        let scale = (baseline * 4.0).max(100.0);
+        return Series::Latency(
+            raw.into_iter()
+                .map(|r| match r {
+                    Some(ms) => Some((ms / scale).min(1.0)),
+                    None if loss => None,
+                    None => Some(0.0),
+                })
+                .collect(),
+        );
+    }
+    let metrics = SectionConfig::metrics(shown);
+    if metrics.contains(&Metric::NetDown) && metrics.contains(&Metric::NetUp) {
+        let down = h.recent(&Key::Metric(Metric::NetDown), n);
+        let up = h.recent(&Key::Metric(Metric::NetUp), n);
+        let max = down
+            .iter()
+            .chain(&up)
+            .flatten()
+            .fold(1e6f32, |a, b| a.max(*b)) as f64;
+        let norm = |v: Vec<Option<f32>>| {
+            v.into_iter()
+                .map(|x| cube_root(x.unwrap_or(0.0) as f64, max))
+                .collect::<Vec<_>>()
+        };
+        return Series::Duplex(norm(down), norm(up));
+    }
+    match metrics.first() {
+        Some(&m) => Series::Level(normalize(m, &h.recent(&Key::Metric(m), n))),
+        None => Series::Level(vec![]),
+    }
+}
+
+/// Draws one Section's Meter at `px` from the last `px` samples, showing `shown`.
+pub fn draw(
+    section: Section,
+    h: &History,
+    config: &Config,
+    shown: &[Readout],
+    px: u32,
+    taskbar: Taskbar,
+) -> Image {
+    meter(
+        section,
+        &series(section, h, config, shown, px as usize).meter(),
+        px,
+        taskbar,
+    )
 }
 
 fn normalize(m: Metric, raw: &[Option<f32>]) -> Vec<f32> {
@@ -62,89 +97,96 @@ fn normalize(m: Metric, raw: &[Option<f32>]) -> Vec<f32> {
     }
 }
 
-type Owned = (Section, String, Vec<f32>, Vec<f32>, Vec<Option<f32>>);
+fn value_text(section: Section, h: &History, config: &Config, shown: &[Readout]) -> String {
+    let s = h.last_sample();
+    let get = |m| s.map(|s| s.get(m)).unwrap_or(0.0);
+    if section == Section::Latency {
+        let st = h.stat(&config.primary, history::RECENT_SECS);
+        let loss = format!("{:.0}%", st.loss * 100.0);
+        return match (shown.contains(&Readout::Ping(Ping::Latency)), st.rtt_ms) {
+            (false, _) => format!("{loss} loss"),
+            (true, None) => "no reply".into(),
+            (true, Some(r)) if st.loss > 0.0 && shown.contains(&Readout::Ping(Ping::Loss)) => {
+                format!("{r:.0}ms {loss}")
+            }
+            (true, Some(r)) => format!("{r:.0} ms"),
+        };
+    }
+    let metrics = SectionConfig::metrics(shown);
+    if metrics.contains(&Metric::NetDown) && metrics.contains(&Metric::NetUp) {
+        return verdict::bytes(get(Metric::NetDown) + get(Metric::NetUp));
+    }
+    let Some(&m) = metrics.first() else {
+        return String::new();
+    };
+    match m.unit() {
+        Unit::Percent => format!("{:.0}%", get(m)),
+        Unit::BytesPerSec => verdict::bytes(get(m)),
+        Unit::Millis => format!("{:.0} ms", get(m)),
+        _ => format!("{:.0}", get(m)),
+    }
+}
 
-/// One Strip cell per visible Section, from the Section's Strip Metrics.
+/// One Strip cell per Section with Strip Readouts.
 pub fn strip(
     h: &History,
     config: &Config,
     height: u32,
     scale: f32,
     font: Option<&FontRef>,
+    taskbar: Taskbar,
 ) -> Image {
-    let n = 60usize;
-    let mut owned: Vec<Owned> = Vec::new();
-    for section in Section::ALL {
-        let c = config.section(section);
-        if !c.visible {
-            continue;
-        }
-        let s = h.last_sample();
-        let get = |m| s.map(|s| s.get(m)).unwrap_or(0.0);
-        let (value, a, b, l) = match section {
-            Section::Latency => {
-                let st = h.stat(&config.primary, history::RECENT_SECS);
-                let raw = h.recent(&Key::Probe(config.primary.clone()), n);
-                let scale = (st.baseline_ms.unwrap_or(20.0) * 4.0).max(100.0);
-                let v = raw
-                    .into_iter()
-                    .map(|r| r.map(|ms| (ms / scale).min(1.0)))
-                    .collect();
-                let text = match st.rtt_ms {
-                    Some(r) if st.loss > 0.0 => format!("{r:.0}ms {:.0}%", st.loss * 100.0),
-                    Some(r) => format!("{r:.0} ms"),
-                    None => "no reply".into(),
-                };
-                (text, vec![], vec![], v)
-            }
-            Section::Network => {
-                let down = h.recent(&Key::Metric(Metric::NetDown), n);
-                let up = h.recent(&Key::Metric(Metric::NetUp), n);
-                let max = down
-                    .iter()
-                    .chain(&up)
-                    .flatten()
-                    .fold(1e6f32, |a, b| a.max(*b)) as f64;
-                let norm = |v: Vec<Option<f32>>| {
-                    v.into_iter()
-                        .map(|x| cube_root(x.unwrap_or(0.0) as f64, max))
-                        .collect()
-                };
-                let text = verdict::bytes(get(Metric::NetDown) + get(Metric::NetUp));
-                (text, norm(down), norm(up), vec![])
-            }
-            _ => {
-                let m = c.strip.first().copied().unwrap_or_else(|| {
-                    Metric::ALL
-                        .into_iter()
-                        .find(|m| m.section() == section)
-                        .unwrap()
-                });
-                let v = normalize(m, &h.recent(&Key::Metric(m), n));
-                let text = match m.unit() {
-                    Unit::Percent => format!("{:.0}%", get(m)),
-                    Unit::BytesPerSec => verdict::bytes(get(m)),
-                    Unit::Millis => format!("{:.0} ms", get(m)),
-                    _ => format!("{:.0}", get(m)),
-                };
-                (text, v, vec![], vec![])
-            }
-        };
-        owned.push((section, value, a, b, l));
-    }
-    let cells: Vec<Cell> = owned
-        .iter()
-        .map(|(section, value, a, b, l)| Cell {
-            section: *section,
-            value: value.clone(),
-            meter: match section {
-                Section::Latency => Meter::Latency(l),
-                Section::Network => Meter::Duplex { down: a, up: b },
-                _ => Meter::Level(a),
-            },
+    let owned: Vec<(Section, String, Series)> = Section::ALL
+        .into_iter()
+        .filter_map(|section| {
+            let shown = &config.section(section).strip;
+            (!shown.is_empty()).then(|| {
+                (
+                    section,
+                    value_text(section, h, config, shown),
+                    series(section, h, config, shown, 60),
+                )
+            })
         })
         .collect();
-    render::strip(&cells, height, scale, font)
+    let cells: Vec<Cell> = owned
+        .iter()
+        .map(|(section, value, series)| Cell {
+            section: *section,
+            value: value.clone(),
+            meter: series.meter(),
+        })
+        .collect();
+    render::strip(&cells, height, scale, font, taskbar)
+}
+
+/// The Menu Icon drawn while the Strip is attached.
+pub fn menu_icon(
+    h: &History,
+    config: &Config,
+    findings: &[verdict::Finding],
+    px: u32,
+    taskbar: Taskbar,
+) -> Image {
+    match config.menu_icon {
+        MenuIcon::App => render::app_icon(px, taskbar, None),
+        MenuIcon::Verdict => {
+            let status = match findings.first().map(|f| f.severity) {
+                Some(verdict::Severity::Crit) => Status::Crit,
+                Some(verdict::Severity::Warn) => Status::Warn,
+                _ => Status::Ok,
+            };
+            render::app_icon(px, taskbar, Some(status))
+        }
+        MenuIcon::Meter(section) => {
+            let c = config.section(section);
+            let shown = [&c.tray, &c.strip, &c.panel]
+                .into_iter()
+                .find(|l| !l.is_empty())
+                .map_or(&[][..], |l| l);
+            draw(section, h, config, shown, px, taskbar)
+        }
+    }
 }
 
 /// Windows truncates notification-area tooltips to 128 characters.
@@ -211,7 +253,7 @@ mod tests {
         fixtures::populate(&mut h, &s, 1_800_000_000);
         let c = Config::default();
         for section in Section::ALL {
-            let img = draw(section, &h, &c, &c.section(section).meter, 24);
+            let img = draw(section, &h, &c, &c.section(section).tray, 24, Taskbar::Dark);
             assert_eq!(img.width(), 24);
             assert!(
                 img.pixels().iter().any(|p| p.alpha() == 255),

@@ -1,11 +1,11 @@
 mod settings;
 pub mod theme;
 
-use config::Config;
+use config::{Config, SectionConfig};
 use egui::{Align, Color32, Layout, RichText, Ui, vec2};
 use egui_plot::{Line, Plot, PlotPoints};
 use history::{History, Key, Point};
-use model::{Metric, Probe, ProcessRow, Section, Unit};
+use model::{Metric, Ping, Probe, ProcessRow, Readout, Section, Unit};
 use theme::{accent, card, severity_color};
 use verdict::{Finding, Severity, bytes};
 
@@ -25,7 +25,7 @@ pub enum Action {
     Quit,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 pub enum Tab {
     #[default]
     Overview,
@@ -75,6 +75,17 @@ impl Range {
 pub struct Panel {
     pub tab: Tab,
     pub range: Range,
+    pub sort: ProcessSort,
+    scroll_to_top: bool,
+}
+
+/// Impact ranks by CPU and memory together, each as a share of the busiest process listed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ProcessSort {
+    #[default]
+    Impact,
+    Cpu,
+    Memory,
 }
 
 impl Default for Panel {
@@ -82,11 +93,19 @@ impl Default for Panel {
         Self {
             tab: Tab::Overview,
             range: Range::Min1,
+            sort: ProcessSort::Impact,
+            scroll_to_top: false,
         }
     }
 }
 
 impl Panel {
+    /// Clicking the open tab again scrolls it to the top.
+    pub fn select(&mut self, tab: Tab) {
+        self.scroll_to_top = self.tab == tab;
+        self.tab = tab;
+    }
+
     pub fn show(&mut self, ui: &mut Ui, view: &View, config: &mut Config) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::CentralPanel::default()
@@ -94,17 +113,21 @@ impl Panel {
             .show(ui, |ui| {
                 self.header(ui, view, &mut actions);
                 ui.add_space(8.0);
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| match self.tab {
-                        Tab::Overview => self.overview(ui, view),
-                        Tab::Network => self.network(ui, view, config),
-                        Tab::Settings => {
-                            if settings::show(ui, config, view) {
-                                actions.push(Action::ConfigChanged);
-                            }
+                let mut scroll = egui::ScrollArea::vertical()
+                    .id_salt(self.tab)
+                    .auto_shrink(false);
+                if std::mem::take(&mut self.scroll_to_top) {
+                    scroll = scroll.vertical_scroll_offset(0.0);
+                }
+                scroll.show(ui, |ui| match self.tab {
+                    Tab::Overview => self.overview(ui, view, config),
+                    Tab::Network => self.network(ui, view, config),
+                    Tab::Settings => {
+                        if settings::show(ui, config, view) {
+                            actions.push(Action::ConfigChanged);
                         }
-                    });
+                    }
+                });
             });
         actions
     }
@@ -121,7 +144,9 @@ impl Panel {
                     (Tab::Network, "Network"),
                     (Tab::Overview, "Overview"),
                 ] {
-                    ui.selectable_value(&mut self.tab, tab, label);
+                    if ui.selectable_label(self.tab == tab, label).clicked() {
+                        self.select(tab);
+                    }
                 }
             });
         });
@@ -140,32 +165,53 @@ impl Panel {
         }
     }
 
-    fn overview(&self, ui: &mut Ui, view: &View) {
+    fn overview(&mut self, ui: &mut Ui, view: &View, config: &Config) {
         let s = view.history.last_sample();
-        for row in [
-            [Section::Cpu, Section::Memory],
-            [Section::Network, Section::Disk],
-        ] {
+        let shown: Vec<(Section, Vec<Metric>)> = [
+            Section::Cpu,
+            Section::Memory,
+            Section::Network,
+            Section::Disk,
+        ]
+        .into_iter()
+        .map(|section| {
+            (
+                section,
+                SectionConfig::metrics(&config.section(section).panel),
+            )
+        })
+        .filter(|(_, m)| !m.is_empty())
+        .collect();
+        for pair in shown.chunks(2) {
             ui.columns(2, |cols| {
-                for (col, section) in cols.iter_mut().zip(row) {
-                    card(col, section, |ui| self.section_card(ui, view, section, s));
+                for (col, (section, plotted)) in cols.iter_mut().zip(pair) {
+                    card(col, *section, |ui| {
+                        self.section_card(ui, view, *section, plotted, s)
+                    });
                 }
             });
             ui.add_space(8.0);
         }
-        card(ui, Section::Latency, |ui| {
-            self.latency_card(ui, view, false)
-        });
-        ui.add_space(8.0);
-        processes(ui, view.processes);
+        let ping = &config.section(Section::Latency).panel;
+        if !ping.is_empty() {
+            card(ui, Section::Latency, |ui| {
+                self.latency_card(ui, view, false, ping)
+            });
+            ui.add_space(8.0);
+        }
+        processes(ui, view.processes, &mut self.sort);
     }
 
-    fn section_card(&self, ui: &mut Ui, view: &View, section: Section, s: Option<&model::Sample>) {
-        let metrics: Vec<Metric> = Metric::ALL
-            .into_iter()
-            .filter(|m| m.section() == section)
-            .collect();
-        let primary = metrics[0];
+    fn section_card(
+        &self,
+        ui: &mut Ui,
+        view: &View,
+        section: Section,
+        plotted: &[Metric],
+        s: Option<&model::Sample>,
+    ) {
+        let primary = plotted[0];
+        let duplex = plotted.contains(&Metric::NetDown) && plotted.contains(&Metric::NetUp);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(section.label())
@@ -174,27 +220,28 @@ impl Panel {
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let v = s.map(|s| s.get(primary)).unwrap_or(0.0);
-                let text = if section == Section::Network {
+                let text = if duplex {
+                    let down = s.map(|s| s.get(Metric::NetDown)).unwrap_or(0.0);
                     let up = s.map(|s| s.get(Metric::NetUp)).unwrap_or(0.0);
-                    format!("↓{}/s ↑{}/s", bytes(v), bytes(up))
+                    format!("↓{}/s ↑{}/s", bytes(down), bytes(up))
                 } else {
                     format_value(primary, v)
                 };
-                let size = if section == Section::Network {
-                    14.0
-                } else {
-                    18.0
-                };
+                let size = if duplex { 14.0 } else { 18.0 };
                 ui.label(RichText::new(text).size(size).strong());
             });
         });
-        let mut lines = vec![(primary, accent(section))];
-        if section == Section::Network {
-            lines.push((Metric::NetUp, theme::UPLOAD));
-        }
-        let series: Vec<_> = lines
+        let series: Vec<_> = plotted
             .iter()
-            .map(|(m, c)| (m.label(), *c, self.points(view, &Key::Metric(*m))))
+            .enumerate()
+            .map(|(i, m)| {
+                let color = match (i, m) {
+                    (_, Metric::NetUp) => theme::UPLOAD,
+                    (0, _) => accent(section),
+                    _ => theme::series(i),
+                };
+                (m.label(), color, self.points(view, &Key::Metric(*m)))
+            })
             .collect();
         let fmt = move |v: f64| match primary.unit() {
             Unit::BytesPerSec => bytes(v),
@@ -207,12 +254,12 @@ impl Panel {
             matches!(primary.unit(), Unit::Percent).then_some(100.0),
             70.0,
             fmt,
+            self.window(view),
         );
         ui.horizontal_wrapped(|ui| {
-            for m in metrics
+            for m in Metric::ALL
                 .iter()
-                .skip(1)
-                .filter(|m| !(section == Section::Network && **m == Metric::NetUp))
+                .filter(|m| m.section() == section && !plotted.contains(m))
             {
                 let v = s.map(|s| s.get(*m)).unwrap_or(0.0);
                 ui.label(
@@ -229,7 +276,11 @@ impl Panel {
         }
     }
 
-    fn latency_card(&self, ui: &mut Ui, view: &View, all: bool) {
+    fn latency_card(&self, ui: &mut Ui, view: &View, all: bool, shown: &[Readout]) {
+        let (latency, loss) = (
+            shown.contains(&Readout::Ping(Ping::Latency)),
+            shown.contains(&Readout::Ping(Ping::Loss)),
+        );
         let probes = latency_probes(view.history, all);
         ui.horizontal(|ui| {
             ui.label(
@@ -244,11 +295,12 @@ impl Panel {
                         .rtt_ms
                         .map(|r| format!("{r:.0} ms"))
                         .unwrap_or("—".into());
-                    ui.label(
-                        RichText::new(format!("{rtt}  {:.0}% loss", st.loss * 100.0))
-                            .size(18.0)
-                            .strong(),
-                    );
+                    let text = match (latency, loss) {
+                        (true, true) => format!("{rtt}  {:.0}% loss", st.loss * 100.0),
+                        (true, false) => rtt,
+                        _ => format!("{:.0}% loss", st.loss * 100.0),
+                    };
+                    ui.label(RichText::new(text).size(18.0).strong());
                 }
             });
         });
@@ -264,7 +316,13 @@ impl Panel {
             })
             .collect();
         let names: Vec<(String, Color32, Vec<Point>)> = series;
-        multiplot(ui, "latency", &names, if all { 180.0 } else { 110.0 });
+        multiplot(
+            ui,
+            "latency",
+            &names,
+            if all { 180.0 } else { 110.0 },
+            self.window(view),
+        );
         ui.horizontal_wrapped(|ui| {
             for (i, p) in probes.iter().enumerate() {
                 let st = view.history.stat(p, history::RECENT_SECS);
@@ -285,17 +343,27 @@ impl Panel {
     }
 
     fn network(&self, ui: &mut Ui, view: &View, config: &Config) {
-        card(ui, Section::Latency, |ui| self.latency_card(ui, view, true));
+        let all = [Readout::Ping(Ping::Latency), Readout::Ping(Ping::Loss)];
+        card(ui, Section::Latency, |ui| {
+            self.latency_card(ui, view, true, &all)
+        });
         for trace in config
             .groups
             .iter()
             .filter(|g| g.enabled)
-            .flat_map(|g| &g.traces)
+            .flat_map(|g| g.traces())
         {
             ui.add_space(8.0);
             card(ui, Section::Latency, |ui| {
-                hop_table(ui, view.history, trace)
+                hop_table(ui, view.history, &trace)
             });
+        }
+    }
+
+    fn window(&self, view: &View) -> Window {
+        Window {
+            now: view.now as f64,
+            secs: self.range.secs() as f64,
         }
     }
 
@@ -363,7 +431,7 @@ fn cores(ui: &mut Ui, per_core: &[f32]) {
     }
 }
 
-fn processes(ui: &mut Ui, rows: &[ProcessRow]) {
+fn processes(ui: &mut Ui, rows: &[ProcessRow], sort: &mut ProcessSort) {
     egui::Frame::new()
         .fill(theme::CARD)
         .corner_radius(10.0)
@@ -375,27 +443,134 @@ fn processes(ui: &mut Ui, rows: &[ProcessRow]) {
                 ui.label(RichText::new("Sampling…").weak());
                 return;
             }
-            egui::Grid::new("procs")
-                .num_columns(4)
-                .striped(true)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    for h in ["Process", "CPU", "Memory", "Disk"] {
-                        ui.label(RichText::new(h).small().weak());
+            let max_cpu = rows.iter().map(|r| r.cpu_pct).fold(1.0, f32::max);
+            let max_mem = rows
+                .iter()
+                .map(|r| r.memory_bytes)
+                .max()
+                .unwrap_or(1)
+                .max(1) as f32;
+            let impact =
+                |r: &ProcessRow| (r.cpu_pct / max_cpu + r.memory_bytes as f32 / max_mem) / 2.0;
+            let mut sorted: Vec<&ProcessRow> = rows.iter().collect();
+            match sort {
+                ProcessSort::Impact => sorted.sort_by(|a, b| impact(b).total_cmp(&impact(a))),
+                ProcessSort::Cpu => sorted.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct)),
+                ProcessSort::Memory => sorted.sort_by_key(|r| std::cmp::Reverse(r.memory_bytes)),
+            }
+
+            let widths = [0.0, 52.0, 56.0, 72.0, 72.0];
+            table_cells(ui, &widths, false, |i, ui| {
+                let (label, key) = match i {
+                    0 => ("Process", None),
+                    1 => ("Impact", Some(ProcessSort::Impact)),
+                    2 => ("CPU", Some(ProcessSort::Cpu)),
+                    3 => ("Memory", Some(ProcessSort::Memory)),
+                    _ => ("Disk", None),
+                };
+                match key {
+                    Some(k) => {
+                        let active = *sort == k;
+                        let text = if active {
+                            format!("{label} ↓")
+                        } else {
+                            label.to_string()
+                        };
+                        let rt = RichText::new(text).small();
+                        let rt = if active {
+                            rt.color(theme::TEXT)
+                        } else {
+                            rt.weak()
+                        };
+                        if ui
+                            .add(egui::Button::new(rt).frame(false))
+                            .on_hover_text(format!("Sort by {label}"))
+                            .clicked()
+                        {
+                            *sort = k;
+                        }
                     }
-                    ui.end_row();
-                    for r in rows.iter().take(8) {
-                        ui.label(&r.name);
+                    None => {
+                        ui.label(RichText::new(label).small().weak());
+                    }
+                }
+            });
+            for (row, r) in sorted.into_iter().take(8).enumerate() {
+                let score = impact(r);
+                table_cells(ui, &widths, row % 2 == 1, |i, ui| match i {
+                    0 => {
+                        ui.add(egui::Label::new(RichText::new(&r.name)).truncate());
+                    }
+                    1 => impact_bar(ui, score),
+                    2 => {
                         ui.label(
                             RichText::new(format!("{:.1}%", r.cpu_pct))
                                 .color(theme::level(Section::Cpu, r.cpu_pct / 100.0)),
                         );
+                    }
+                    3 => {
                         ui.label(bytes(r.memory_bytes as f64));
+                    }
+                    _ => {
                         ui.label(format!("{}/s", bytes(r.disk_bps)));
-                        ui.end_row();
                     }
                 });
+            }
         });
+}
+
+fn impact_bar(ui: &mut Ui, score: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(44.0, 8.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 3.0, theme::faint());
+    let mut fill = rect;
+    fill.set_width(rect.width() * score.clamp(0.0, 1.0));
+    ui.painter()
+        .rect_filled(fill, 3.0, theme::level(Section::Cpu, score));
+}
+
+/// Fixed-width columns so values don't shift as rows change. Width 0 takes the remaining space,
+/// left-aligned; every other column is right-aligned.
+pub(crate) fn table_cells(
+    ui: &mut Ui,
+    widths: &[f32],
+    stripe: bool,
+    mut cell: impl FnMut(usize, &mut Ui),
+) {
+    let fixed: f32 = widths.iter().sum();
+    let gap = 8.0;
+    let flex = (ui.available_width() - fixed - gap * widths.len() as f32).max(40.0);
+    let fill = if stripe {
+        theme::faint()
+    } else {
+        Color32::TRANSPARENT
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(4, 1))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (i, w) in widths.iter().enumerate() {
+                    let (width, layout) = if *w == 0.0 {
+                        (flex, Layout::left_to_right(Align::Center))
+                    } else {
+                        (*w, Layout::right_to_left(Align::Center))
+                    };
+                    ui.allocate_ui_with_layout(vec2(width, 18.0), layout, |ui| {
+                        ui.set_width(width);
+                        cell(i, ui);
+                    });
+                }
+            });
+        });
+}
+
+fn table_row(ui: &mut Ui, cells: &[(f32, RichText)], stripe: bool) {
+    let widths: Vec<f32> = cells.iter().map(|(w, _)| *w).collect();
+    table_cells(ui, &widths, stripe, |i, ui| {
+        ui.add(egui::Label::new(cells[i].1.clone()).truncate());
+    });
 }
 
 fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
@@ -410,33 +585,45 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
         return;
     }
     let ms = |v: Option<f32>| v.map(|v| format!("{v:.1}")).unwrap_or("—".into());
-    egui::Grid::new(("hops", trace.to_string()))
-        .num_columns(7)
-        .striped(true)
-        .spacing([12.0, 3.0])
-        .show(ui, |ui| {
-            for c in ["#", "Address", "Loss", "Last", "Avg", "Best", "Worst"] {
-                ui.label(RichText::new(c).small().weak());
-            }
-            ui.end_row();
-            for hop in hops {
-                ui.label(RichText::new(hop.ttl.to_string()).weak());
-                ui.label(hop.addr.map(|a| a.to_string()).unwrap_or("???".into()));
-                let loss_color = if hop.loss >= 0.2 {
-                    theme::CRIT
-                } else if hop.loss > 0.0 {
-                    theme::WARN
-                } else {
-                    theme::TEXT_WEAK
-                };
-                ui.label(RichText::new(format!("{:.0}%", hop.loss * 100.0)).color(loss_color));
-                ui.label(ms(hop.last_ms));
-                ui.label(ms(hop.avg_ms));
-                ui.label(ms(hop.best_ms));
-                ui.label(ms(hop.worst_ms));
-                ui.end_row();
-            }
-        });
+    let cols: [(f32, &str); 7] = [
+        (22.0, "#"),
+        (0.0, "Address"),
+        (40.0, "Loss"),
+        (44.0, "Last"),
+        (44.0, "Avg"),
+        (44.0, "Best"),
+        (44.0, "Worst"),
+    ];
+    table_row(
+        ui,
+        &cols.map(|(w, h)| (w, RichText::new(h).small().weak())),
+        false,
+    );
+    for (i, hop) in hops.iter().enumerate() {
+        let loss_color = if hop.loss >= 0.2 {
+            theme::CRIT
+        } else if hop.loss > 0.0 {
+            theme::WARN
+        } else {
+            theme::TEXT_WEAK
+        };
+        let cells = [
+            (22.0, RichText::new(hop.ttl.to_string()).weak()),
+            (
+                0.0,
+                RichText::new(hop.addr.map(|a| a.to_string()).unwrap_or("???".into())),
+            ),
+            (
+                40.0,
+                RichText::new(format!("{:.0}%", hop.loss * 100.0)).color(loss_color),
+            ),
+            (44.0, RichText::new(ms(hop.last_ms))),
+            (44.0, RichText::new(ms(hop.avg_ms))),
+            (44.0, RichText::new(ms(hop.best_ms))),
+            (44.0, RichText::new(ms(hop.worst_ms))),
+        ];
+        table_row(ui, &cells, i % 2 == 1);
+    }
 }
 
 fn format_value(m: Metric, v: f64) -> String {
@@ -449,12 +636,24 @@ fn format_value(m: Metric, v: f64) -> String {
     }
 }
 
-fn to_line(name: impl Into<String>, color: Color32, pts: &[Point], fill: bool) -> Line<'static> {
-    let newest = pts.last().map(|p| p.at).unwrap_or(0) as f64;
+/// The plotted time range: x runs from -`secs` to 0, where 0 is `now`.
+#[derive(Clone, Copy)]
+struct Window {
+    now: f64,
+    secs: f64,
+}
+
+fn to_line(
+    name: impl Into<String>,
+    color: Color32,
+    pts: &[Point],
+    fill: bool,
+    w: Window,
+) -> Line<'static> {
     let xy: Vec<[f64; 2]> = pts
         .iter()
         .filter(|p| p.mean.is_finite())
-        .map(|p| [p.at as f64 - newest, p.mean as f64])
+        .map(|p| [p.at as f64 - w.now, p.mean as f64])
         .collect();
     let line = Line::new(name, PlotPoints::from(xy))
         .color(color)
@@ -473,32 +672,40 @@ fn sparkplot(
     max: Option<f64>,
     height: f32,
     fmt: impl Fn(f64) -> String + 'static,
+    w: Window,
 ) {
-    let mut plot = base_plot(id, height)
+    let mut plot = base_plot(id, height, w)
         .include_y(0.0)
         .y_axis_formatter(move |m, _| fmt(m.value));
     if let Some(m) = max {
         plot = plot.include_y(m);
     }
     plot.show(ui, |pu| {
+        unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
         for (name, color, pts) in &series {
-            pu.line(to_line(*name, *color, pts, true));
+            pu.line(to_line(*name, *color, pts, true, w));
         }
     });
 }
 
-fn multiplot(ui: &mut Ui, id: &str, series: &[(String, Color32, Vec<Point>)], height: f32) {
-    base_plot(id, height)
+fn multiplot(
+    ui: &mut Ui,
+    id: &str,
+    series: &[(String, Color32, Vec<Point>)],
+    height: f32,
+    w: Window,
+) {
+    base_plot(id, height, w)
         .include_y(0.0)
         .y_axis_formatter(|m, _| format!("{:.0} ms", m.value))
         .show(ui, |pu| {
+            unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
             for (name, color, pts) in series {
-                pu.line(to_line(name.clone(), *color, pts, false));
-                let newest = pts.last().map(|p| p.at).unwrap_or(0) as f64;
+                pu.line(to_line(name.clone(), *color, pts, false, w));
                 let lost: Vec<[f64; 2]> = pts
                     .iter()
                     .filter(|p| p.loss > 0.0)
-                    .map(|p| [p.at as f64 - newest, 0.0])
+                    .map(|p| [p.at as f64 - w.now, 0.0])
                     .collect();
                 if !lost.is_empty() {
                     pu.points(
@@ -511,8 +718,29 @@ fn multiplot(ui: &mut Ui, id: &str, series: &[(String, Color32, Vec<Point>)], he
         });
 }
 
-fn base_plot(id: &str, height: f32) -> Plot<'static> {
+/// Shades the part of the window before the first recorded point, so a 24h view of 20 minutes of data reads as such.
+fn unrecorded<'a>(
+    pu: &mut egui_plot::PlotUi,
+    w: Window,
+    series: impl Iterator<Item = &'a [Point]>,
+) {
+    let first = series
+        .filter_map(|p| p.first().map(|p| p.at as f64 - w.now))
+        .reduce(f64::min)
+        .unwrap_or(0.0);
+    if first > -w.secs + w.secs * 0.01 {
+        pu.span(
+            egui_plot::Span::new("not recorded", -w.secs..=first)
+                .fill(Color32::from_white_alpha(8))
+                .border_width(0.0),
+        );
+    }
+}
+
+fn base_plot(id: &str, height: f32, w: Window) -> Plot<'static> {
     Plot::new(id.to_owned())
+        .include_x(-w.secs)
+        .include_x(0.0)
         .height(height)
         .show_axes([false, true])
         .show_grid([false, true])
@@ -527,4 +755,18 @@ fn base_plot(id: &str, height: f32) -> Plot<'static> {
 
 pub fn severity_dot(s: Severity) -> Color32 {
     severity_color(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reselecting_the_open_tab_scrolls_to_top() {
+        let mut p = Panel::default();
+        p.select(Tab::Network);
+        assert!(!p.scroll_to_top);
+        p.select(Tab::Network);
+        assert!(p.scroll_to_top);
+    }
 }

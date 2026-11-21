@@ -9,6 +9,7 @@ publish = false
 config.workspace = true
 engine.workspace = true
 meters.workspace = true
+render.workspace = true
 model.workspace = true
 
 [target.'cfg(windows)'.dependencies]

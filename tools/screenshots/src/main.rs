@@ -3,7 +3,7 @@
 
 use fixtures::Scenario;
 use model::Section;
-use render::{Image, Meter, meter};
+use render::{Image, Meter, Status, Taskbar, app_icon, meter};
 use std::{fmt::Write, fs, path::PathBuf};
 use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Transform};
 
@@ -22,14 +22,7 @@ fn main() {
     let prefix = args.next().unwrap_or_default();
     fs::create_dir_all(&out).unwrap();
 
-    let mut index =
-        String::from("| Scenario | Tray Icons (actual size above, 4× zoom below) |\n|---|---|\n");
-    for s in fixtures::all() {
-        let file = format!("{}.png", s.name);
-        sheet(&s).save_png(out.join(&file)).unwrap();
-        writeln!(index, "| {} | ![{}]({prefix}{file}) |", s.caption, s.name).unwrap();
-    }
-    index.push_str("\n| Taskbar Strip | |\n|---|---|\n");
+    let mut index = String::from("| Taskbar Strip | |\n|---|---|\n");
     for (file, caption) in strips(&out) {
         writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
     }
@@ -37,10 +30,18 @@ fn main() {
     for (file, caption) in panels(&out) {
         writeln!(index, "| {caption} | ![{file}]({prefix}{file}) |").unwrap();
     }
+    let busy = fixtures::all().remove(1);
+    sheet(&busy).save_png(out.join("tray-icons.png")).unwrap();
+    writeln!(
+        index,
+        "\n**Tray Icons** ({}): the five Meters, then the Menu Icon as app icon and in each Verdict color; actual size on dark and light taskbars, then 4× zoom\n\n![tray-icons]({prefix}tray-icons.png)",
+        busy.caption
+    )
+    .unwrap();
     fs::write(out.join("index.md"), index).unwrap();
 }
 
-fn meters(s: &Scenario, px: u32) -> Vec<Image> {
+fn meters(s: &Scenario, px: u32, taskbar: Taskbar) -> Vec<Image> {
     Section::ALL
         .iter()
         .map(|&section| {
@@ -54,38 +55,53 @@ fn meters(s: &Scenario, px: u32) -> Vec<Image> {
                 },
                 Section::Latency => Meter::Latency(&s.rtt),
             };
-            meter(section, &m, px)
+            meter(section, &m, px, taskbar)
         })
+        .chain(
+            [
+                None,
+                Some(Status::Ok),
+                Some(Status::Warn),
+                Some(Status::Crit),
+            ]
+            .map(|status| app_icon(px, taskbar, status)),
+        )
         .collect()
 }
 
 fn sheet(s: &Scenario) -> Pixmap {
-    let n = Section::ALL.len() as u32;
+    let n = Section::ALL.len() as u32 + 4;
     let zoomed = ICON * ZOOM;
     let width = n * zoomed + (n + 1) * GAP;
-    let height = TASKBAR + GAP + zoomed + GAP;
+    let height = 2 * TASKBAR + GAP + zoomed + GAP;
     let mut sheet = Pixmap::new(width, height).unwrap();
     sheet.fill(Color::from_rgba8(0x1b, 0x2a, 0x3a, 0xff));
 
-    let mut taskbar = Pixmap::new(width, TASKBAR).unwrap();
-    taskbar.fill(Color::from_rgba8(0x20, 0x20, 0x20, 0xff));
-    blit(&mut sheet, &taskbar, 0, 0, 1);
     let tray_start = width - GAP - n * (TRAY + 8);
-    for (i, img) in meters(s, TRAY).iter().enumerate() {
-        blit(
-            &mut sheet,
-            img,
-            tray_start + i as u32 * (TRAY + 8),
-            (TASKBAR - TRAY) / 2,
-            1,
-        );
+    for (row, (taskbar, bg)) in [(Taskbar::Dark, 0x20), (Taskbar::Light, 0xf3)]
+        .into_iter()
+        .enumerate()
+    {
+        let y = row as u32 * TASKBAR;
+        let mut bar = Pixmap::new(width, TASKBAR).unwrap();
+        bar.fill(Color::from_rgba8(bg, bg, bg, 0xff));
+        blit(&mut sheet, &bar, 0, y, 1);
+        for (i, img) in meters(s, TRAY, taskbar).iter().enumerate() {
+            blit(
+                &mut sheet,
+                img,
+                tray_start + i as u32 * (TRAY + 8),
+                y + (TASKBAR - TRAY) / 2,
+                1,
+            );
+        }
     }
-    for (i, img) in meters(s, ICON).iter().enumerate() {
+    for (i, img) in meters(s, ICON, Taskbar::Dark).iter().enumerate() {
         blit(
             &mut sheet,
             img,
             GAP + i as u32 * (zoomed + GAP),
-            TASKBAR + GAP,
+            2 * TASKBAR + GAP,
             ZOOM,
         );
     }
@@ -104,15 +120,16 @@ fn blit(dst: &mut Pixmap, src: &Pixmap, x: u32, y: u32, scale: u32) {
 const NOW: u64 = 1_800_000_000;
 
 fn panels(out: &std::path::Path) -> Vec<(String, String)> {
-    use panel::{Panel, Tab, View};
+    use panel::{Panel, Range, Tab, View};
     let mut shots = Vec::new();
-    let mut targets = vec![
-        ("isp-loss", Tab::Overview),
-        ("upload-saturation", Tab::Overview),
-        ("isp-loss", Tab::Network),
+    let targets = [
+        ("isp-loss", Tab::Overview, Range::Min1),
+        ("upload-saturation", Tab::Overview, Range::Min1),
+        ("isp-loss", Tab::Network, Range::Min1),
+        ("isp-loss", Tab::Network, Range::Hour),
+        ("idle", Tab::Settings, Range::Min1),
     ];
-    targets.push(("idle", Tab::Settings));
-    for (name, tab) in targets {
+    for (name, tab, range) in targets {
         let s = fixtures::all()
             .into_iter()
             .find(|s| s.name == name)
@@ -123,13 +140,15 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
         let processes = fixtures::processes();
         let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
         let mut config = config::Config::default();
-        let mut panel = Panel {
-            tab,
-            ..Panel::default()
-        };
+        let mut panel = Panel::default();
+        panel.tab = tab;
+        panel.range = range;
         let mut themed = false;
         let mut harness = egui_kittest::Harness::builder()
-            .with_size(egui::vec2(460.0, 760.0))
+            .with_size(egui::vec2(
+                460.0,
+                if tab == Tab::Settings { 1750.0 } else { 1080.0 },
+            ))
             .with_pixels_per_point(2.0)
             .allow_missing_glyphs()
             .with_accessibility_check(false)
@@ -151,13 +170,18 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
                 panel.show(ui, &view, &mut config);
             });
         harness.run_steps(4);
-        let file = format!("panel-{name}-{tab:?}.png").to_lowercase();
+        let suffix = if range == Range::Min1 {
+            String::new()
+        } else {
+            format!("-{range:?}")
+        };
+        let file = format!("panel-{name}-{tab:?}{suffix}.png").to_lowercase();
         harness
             .render()
             .expect("wgpu render")
             .save(out.join(&file))
             .unwrap();
-        shots.push((file, format!("{tab:?} · {}", s.caption)));
+        shots.push((file, format!("{tab:?} · {} · {range:?}", s.caption)));
     }
     shots
 }
@@ -184,11 +208,16 @@ fn strips(out: &std::path::Path) -> Vec<(String, String)> {
         .map(|s| {
             let mut h = history::History::open(None, 15, 7);
             fixtures::populate(&mut h, s, NOW);
-            let strip = meters::strip(&h, &config, height, scale, font.as_ref());
-            let w = strip.width() + (220.0 * scale) as u32;
-            let mut bar = Pixmap::new(w, height).unwrap();
+            let dark = meters::strip(&h, &config, height, scale, font.as_ref(), Taskbar::Dark);
+            let light = meters::strip(&h, &config, height, scale, font.as_ref(), Taskbar::Light);
+            let w = dark.width() + (220.0 * scale) as u32;
+            let mut bar = Pixmap::new(w, 2 * height).unwrap();
             bar.fill(Color::from_rgba8(0x1c, 0x1c, 0x1c, 0xff));
-            blit(&mut bar, &strip, (40.0 * scale) as u32, 0, 1);
+            let mut lightbar = Pixmap::new(w, height).unwrap();
+            lightbar.fill(Color::from_rgba8(0xf3, 0xf3, 0xf3, 0xff));
+            blit(&mut bar, &lightbar, 0, height, 1);
+            blit(&mut bar, &dark, (40.0 * scale) as u32, 0, 1);
+            blit(&mut bar, &light, (40.0 * scale) as u32, height, 1);
             let file = format!("strip-{}.png", s.name);
             bar.save_png(out.join(&file)).unwrap();
             (file, s.caption.to_string())

@@ -116,6 +116,55 @@ impl Metric {
     }
 }
 
+/// What a Surface can show: a Metric, or a property of the Latency Meter's Probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Readout {
+    Metric(Metric),
+    Ping(Ping),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Ping {
+    Latency,
+    Loss,
+}
+
+impl Readout {
+    pub const ALL: [Readout; 16] = {
+        let mut all = [Readout::Ping(Ping::Latency); 16];
+        let mut i = 0;
+        while i < Metric::ALL.len() {
+            all[i] = Readout::Metric(Metric::ALL[i]);
+            i += 1;
+        }
+        all[15] = Readout::Ping(Ping::Loss);
+        all
+    };
+
+    pub fn section(self) -> Section {
+        match self {
+            Readout::Metric(m) => m.section(),
+            Readout::Ping(_) => Section::Latency,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Readout::Metric(m) => m.label(),
+            Readout::Ping(Ping::Latency) => "Latency",
+            Readout::Ping(Ping::Loss) => "Loss",
+        }
+    }
+
+    pub fn metric(self) -> Option<Metric> {
+        match self {
+            Readout::Metric(m) => Some(m),
+            Readout::Ping(_) => None,
+        }
+    }
+}
+
 /// Values of every Metric at one instant. Rates are per second over the previous interval.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
@@ -169,6 +218,8 @@ impl std::fmt::Display for Target {
 pub enum Protocol {
     Icmp,
     Tcp(u16),
+    /// A datagram to a port; a reply or an ICMP port-unreachable both prove the host answered.
+    Udp(u16),
     /// UDP DNS query on port 53.
     Dns,
 }
@@ -178,6 +229,7 @@ impl std::fmt::Display for Protocol {
         match self {
             Protocol::Icmp => f.write_str("icmp"),
             Protocol::Tcp(p) => write!(f, "tcp:{p}"),
+            Protocol::Udp(p) => write!(f, "udp:{p}"),
             Protocol::Dns => f.write_str("dns"),
         }
     }
