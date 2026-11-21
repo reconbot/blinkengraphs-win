@@ -13,12 +13,12 @@ Budget: under 1% CPU and about 30 MB RAM when idle with the Panel closed. These 
 | Area | Decision |
 |---|---|
 | Audience | The author first, ready for fleet use later. Settings are changed in the app's menus and saved as TOML |
-| Privileges | Never requires admin; Elevated Extras switch on only when the app is already elevated ([ADR 0002](adr/0002-no-admin-by-default.md)) |
+| Privileges | Never requires admin ([ADR 0002](adr/0002-no-admin-by-default.md)); the one Elevated Extra, bytes per process, comes from an optional companion service ([ADR 0008](adr/0008-elevated-extras-via-companion-service.md)) |
 | Surfaces | Tray Icons, one per Section, each can be hidden. The Taskbar Strip is in v1 and, when active, replaces the Meter icons with one Menu Icon. It falls back to Tray Icons ([ADR 0001](adr/0001-tray-icons-supported-strip-unsupported.md)) |
 | Metrics | Each Section has several Metrics, each switchable per Surface. Defaults are listed below |
 | Probes | The user chooses the Probes (protocol × Target). Defaults are listed below |
 | Cadence | Each Probe Group has its own interval, default 1 s. Everything pauses while the display is off or the session is locked |
-| Hop Trace | Continuous, at 1 s by default. ICMP needs no admin. TCP depends on the M0 spike. UDP is an Elevated Extra |
+| Hop Trace | Continuous, at 1 s by default. ICMP needs no admin. TCP depends on the M0 spike. No UDP traces ([ADR 0008](adr/0008-elevated-extras-via-companion-service.md)) |
 | Verdict | Rule-based, shown at the top of the Panel and in the tooltip |
 | Processes | Process Snapshot only while the Panel is open ([ADR 0003](adr/0003-process-snapshot-only-while-panel-open.md)) |
 | History | 15 min of Samples in RAM, plus 7 days of Rollups in SQLite |
