@@ -1,6 +1,6 @@
 use model::{Metric, Probe, ProbeStat, Protocol, Sample, Target};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum FaultDomain {
     Clear,
     LocalLoad,
@@ -12,14 +12,14 @@ pub enum FaultDomain {
     SelfSaturation,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum Severity {
     Ok,
     Warn,
     Crit,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct Finding {
     pub domain: FaultDomain,
     pub severity: Severity,

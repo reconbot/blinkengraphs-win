@@ -1,0 +1,15 @@
+[package]
+name = "vectors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+model.workspace = true
+history.workspace = true
+verdict.workspace = true
+render.workspace = true
+fixtures.workspace = true
+serde.workspace = true
+serde_json = "1"

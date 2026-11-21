@@ -1,6 +1,8 @@
 # blinkengraphs
 
-Project memory lives in the repo: vocabulary `CONTEXT.md`, decisions `docs/adr/`, plan `docs/PLAN.md`, research `docs/research/`. Record learnings there.
+Project memory lives in the repo: decisions `docs/adr/`, plan `docs/PLAN.md`, research `docs/research/`. Record learnings there.
+
+Vocabulary, Verdict rules, test vectors and design tokens live in the spec repo, reconbot/blinkengraphs. Rule changes start there; regenerate its `vectors/` and `fixtures/` with `cargo run -p vectors -- <spec checkout>`.
 
 Skills (`mattpocock-skills`): `domain-modeling` when a term or decision changes, `codebase-design` when shaping a module interface, `tdd` for features and fixes, `writing-for-agents` for any doc or CLAUDE.md edit.
 
