@@ -55,7 +55,11 @@ Tray Icons (actual size, then 4× zoom):
   - Themes, and a color per Probe
   - Per displayed Probe: time window and aggregate (p99, p95, p50, avg, max)
   - Graph aggregate for all graphs (same choices)
-- [ ] **M3: Elevated Extras and distribution.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md)); autostart; SignPath signing; installer
+- [ ] **M3: Distribution.**
+  - Code signing, so browsers and SmartScreen stop blocking downloads ([research 05](docs/research/05-signing-and-installer.md), pending)
+  - Installer that installs per-user without admin and deploys through Intune
+  - Autostart
+- [ ] **M4: Elevated Extras.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md))
 
 ## Docs
 
