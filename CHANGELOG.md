@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.1.0...v1.2.0) (2026-11-21)
+
+
+### Features
+
+* configurable history length with a disk estimate ([#11](https://github.com/reconbot/blinkengraphs-win/issues/11)) ([822c6e3](https://github.com/reconbot/blinkengraphs-win/commit/822c6e3369d6d5c3d778a185ead73e721f62500d))
+* spec v1 exports (probe stats, hop trace, defaults), gateway-unmeasured Verdict; split M3/M4 ([#8](https://github.com/reconbot/blinkengraphs-win/issues/8)) ([32bcaf6](https://github.com/reconbot/blinkengraphs-win/commit/32bcaf6e1dbebef1cd604c17b8a1392bf5dfa4c4))
+* themes, colors, per-Probe window and aggregate, graph aggregate from per-minute histograms ([#10](https://github.com/reconbot/blinkengraphs-win/issues/10)) ([01dba62](https://github.com/reconbot/blinkengraphs-win/commit/01dba62cb78d097481bf141f0b91d47988a3cbc6))
+
 ## [1.1.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.0.0...v1.1.0) (2026-11-21)
 
 
