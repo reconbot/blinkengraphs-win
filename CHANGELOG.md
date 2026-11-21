@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.0.0...v1.1.0) (2026-11-21)
+
+
+### Features
+
+* spec split, Probe Group tables with UDP/ports, Panel fixes from hardware testing ([#6](https://github.com/reconbot/blinkengraphs-win/issues/6)) ([606db34](https://github.com/reconbot/blinkengraphs-win/commit/606db3454d46f7ce6bdb1f845327604529fc55f0))
+
 ## [1.0.0](https://github.com/reconbot/blinkengraphs-win/compare/v0.1.0...v1.0.0) (2026-11-21)
 
 
