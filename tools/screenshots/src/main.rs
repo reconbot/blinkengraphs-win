@@ -130,11 +130,9 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
         let processes = fixtures::processes();
         let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
         let mut config = config::Config::default();
-        let mut panel = Panel {
-            tab,
-            range,
-            ..Panel::default()
-        };
+        let mut panel = Panel::default();
+        panel.tab = tab;
+        panel.range = range;
         let mut themed = false;
         let mut harness = egui_kittest::Harness::builder()
             .with_size(egui::vec2(460.0, 1080.0))

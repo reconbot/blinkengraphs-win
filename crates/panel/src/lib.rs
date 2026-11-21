@@ -25,7 +25,7 @@ pub enum Action {
     Quit,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
 pub enum Tab {
     #[default]
     Overview,
@@ -76,6 +76,7 @@ pub struct Panel {
     pub tab: Tab,
     pub range: Range,
     pub sort: ProcessSort,
+    scroll_to_top: bool,
 }
 
 /// Impact ranks by CPU and memory together, each as a share of the busiest process listed.
@@ -93,11 +94,18 @@ impl Default for Panel {
             tab: Tab::Overview,
             range: Range::Min1,
             sort: ProcessSort::Impact,
+            scroll_to_top: false,
         }
     }
 }
 
 impl Panel {
+    /// Clicking the open tab again scrolls it to the top.
+    pub fn select(&mut self, tab: Tab) {
+        self.scroll_to_top = self.tab == tab;
+        self.tab = tab;
+    }
+
     pub fn show(&mut self, ui: &mut Ui, view: &View, config: &mut Config) -> Vec<Action> {
         let mut actions = Vec::new();
         egui::CentralPanel::default()
@@ -105,17 +113,21 @@ impl Panel {
             .show(ui, |ui| {
                 self.header(ui, view, &mut actions);
                 ui.add_space(8.0);
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| match self.tab {
-                        Tab::Overview => self.overview(ui, view),
-                        Tab::Network => self.network(ui, view, config),
-                        Tab::Settings => {
-                            if settings::show(ui, config, view) {
-                                actions.push(Action::ConfigChanged);
-                            }
+                let mut scroll = egui::ScrollArea::vertical()
+                    .id_salt(self.tab)
+                    .auto_shrink(false);
+                if std::mem::take(&mut self.scroll_to_top) {
+                    scroll = scroll.vertical_scroll_offset(0.0);
+                }
+                scroll.show(ui, |ui| match self.tab {
+                    Tab::Overview => self.overview(ui, view),
+                    Tab::Network => self.network(ui, view, config),
+                    Tab::Settings => {
+                        if settings::show(ui, config, view) {
+                            actions.push(Action::ConfigChanged);
                         }
-                    });
+                    }
+                });
             });
         actions
     }
@@ -132,7 +144,9 @@ impl Panel {
                     (Tab::Network, "Network"),
                     (Tab::Overview, "Overview"),
                 ] {
-                    ui.selectable_value(&mut self.tab, tab, label);
+                    if ui.selectable_label(self.tab == tab, label).clicked() {
+                        self.select(tab);
+                    }
                 }
             });
         });
@@ -308,11 +322,11 @@ impl Panel {
             .groups
             .iter()
             .filter(|g| g.enabled)
-            .flat_map(|g| &g.traces)
+            .flat_map(|g| g.traces())
         {
             ui.add_space(8.0);
             card(ui, Section::Latency, |ui| {
-                hop_table(ui, view.history, trace)
+                hop_table(ui, view.history, &trace)
             });
         }
     }
@@ -487,7 +501,12 @@ fn impact_bar(ui: &mut Ui, score: f32) {
 
 /// Fixed-width columns so values don't shift as rows change. Width 0 takes the remaining space,
 /// left-aligned; every other column is right-aligned.
-fn table_cells(ui: &mut Ui, widths: &[f32], stripe: bool, mut cell: impl FnMut(usize, &mut Ui)) {
+pub(crate) fn table_cells(
+    ui: &mut Ui,
+    widths: &[f32],
+    stripe: bool,
+    mut cell: impl FnMut(usize, &mut Ui),
+) {
     let fixed: f32 = widths.iter().sum();
     let gap = 8.0;
     let flex = (ui.available_width() - fixed - gap * widths.len() as f32).max(40.0);
@@ -707,4 +726,18 @@ fn base_plot(id: &str, height: f32, w: Window) -> Plot<'static> {
 
 pub fn severity_dot(s: Severity) -> Color32 {
     severity_color(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reselecting_the_open_tab_scrolls_to_top() {
+        let mut p = Panel::default();
+        p.select(Tab::Network);
+        assert!(!p.scroll_to_top);
+        p.select(Tab::Network);
+        assert!(p.scroll_to_top);
+    }
 }
