@@ -12,6 +12,8 @@ pub struct Config {
     pub surface: Surface,
     pub menu_icon: MenuIcon,
     pub appearance: Appearance,
+    /// What each point of a history graph shows when it covers several samples.
+    pub graph_aggregate: model::Aggregate,
     /// Keyed by the Probe's display form, e.g. "icmp 1.1.1.1". Missing means `ProbeView::default()`.
     pub probe_views: std::collections::BTreeMap<String, ProbeView>,
     pub sections: Vec<SectionConfig>,
@@ -391,6 +393,7 @@ impl Default for Config {
             surface: Surface::TaskbarStrip,
             menu_icon: MenuIcon::App,
             appearance: Appearance::default(),
+            graph_aggregate: model::Aggregate::Avg,
             probe_views: Default::default(),
             sections: vec![
                 all(&[CpuTotal]),

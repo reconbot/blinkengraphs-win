@@ -51,6 +51,18 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View) -> bool {
                 });
         });
         ui.horizontal(|ui| {
+            ui.label("Graph values");
+            egui::ComboBox::from_id_salt("graph_aggregate")
+                .selected_text(config.graph_aggregate.label())
+                .show_ui(ui, |ui| {
+                    for a in Aggregate::ALL {
+                        ui.selectable_value(&mut config.graph_aggregate, a, a.label());
+                    }
+                });
+        })
+        .response
+        .on_hover_text("How each point of a history graph sums up the samples it covers");
+        ui.horizontal(|ui| {
             ui.label("Panel hotkey");
             ui.text_edit_singleline(&mut config.hotkey);
         });

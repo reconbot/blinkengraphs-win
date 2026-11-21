@@ -77,6 +77,7 @@ pub struct Panel {
     pub range: Range,
     pub sort: ProcessSort,
     scroll_to_top: bool,
+    graph_aggregate: model::Aggregate,
 }
 
 /// Impact ranks by CPU and memory together, each as a share of the busiest process listed.
@@ -95,6 +96,7 @@ impl Default for Panel {
             range: Range::Min1,
             sort: ProcessSort::Impact,
             scroll_to_top: false,
+            graph_aggregate: model::Aggregate::Avg,
         }
     }
 }
@@ -109,6 +111,7 @@ impl Panel {
     pub fn show(&mut self, ui: &mut Ui, view: &View, config: &mut Config) -> Vec<Action> {
         let mut actions = Vec::new();
         theme::apply(ui.ctx(), &config.appearance);
+        self.graph_aggregate = config.graph_aggregate;
         egui::CentralPanel::default()
             .frame(theme::window_frame())
             .show(ui, |ui| {
@@ -379,10 +382,19 @@ impl Panel {
     }
 
     fn points(&self, view: &View, key: &Key) -> Vec<Point> {
-        view.history
-            .series(key, view.now.saturating_sub(self.range.secs()), view.now)
+        let secs = self.range.secs();
+        view.history.series(
+            key,
+            view.now.saturating_sub(secs),
+            view.now,
+            (secs / GRAPH_POINTS).max(1),
+            self.graph_aggregate,
+        )
     }
 }
+
+/// Buckets per graph: about one per pixel of a half-width card.
+const GRAPH_POINTS: u64 = 240;
 
 fn latency_probes(h: &History, all: bool) -> Vec<Probe> {
     let mut v: Vec<Probe> = h
@@ -671,8 +683,8 @@ fn to_line(
 ) -> Line<'static> {
     let xy: Vec<[f64; 2]> = pts
         .iter()
-        .filter(|p| p.mean.is_finite())
-        .map(|p| [p.at as f64 - w.now, p.mean as f64])
+        .filter(|p| p.value.is_finite())
+        .map(|p| [p.at as f64 - w.now, p.value as f64])
         .collect();
     let line = Line::new(name, PlotPoints::from(xy))
         .color(color)

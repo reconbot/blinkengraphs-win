@@ -1,5 +1,9 @@
+mod sketch;
+pub use sketch::{Sketch, index as sketch_index, rep as sketch_rep};
+
 use model::{Aggregate, HopResult, Metric, Probe, ProbeResult, ProbeStat, Sample};
 use rusqlite::{Connection, params};
+use std::collections::BTreeMap;
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
@@ -21,14 +25,101 @@ impl Key {
     }
 }
 
-/// A raw sample has min = mean = max; `loss` is the lost fraction (0 or 1 when raw).
+/// One graph bucket starting at `at`: the chosen aggregate (NaN when nothing replied) and the lost fraction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
     pub at: u64,
-    pub min: f32,
-    pub mean: f32,
-    pub max: f32,
+    pub value: f32,
     pub loss: f32,
+}
+
+/// Everything kept about one key's minute, or a merge of several (spec `rules/graph-aggregate.md`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Minute {
+    pub n: u64,
+    pub lost: u64,
+    pub sum: f64,
+    pub min: f64,
+    pub max: f64,
+    pub sketch: Sketch,
+}
+
+impl Minute {
+    /// `values` in arrival order, so `sum` is reproducible.
+    pub fn of(values: &[Option<f32>]) -> Self {
+        let mut m = Minute {
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            ..Minute::default()
+        };
+        for v in values {
+            match v {
+                Some(v) => {
+                    let v = *v as f64;
+                    m.n += 1;
+                    m.sum += v;
+                    m.min = m.min.min(v);
+                    m.max = m.max.max(v);
+                    m.sketch.add(v);
+                }
+                None => m.lost += 1,
+            }
+        }
+        m
+    }
+
+    /// Merge minutes in ascending time order; f64 addition is not associative.
+    pub fn merge(&mut self, o: &Minute) {
+        if self.n == 0 && self.lost == 0 {
+            *self = o.clone();
+            return;
+        }
+        self.n += o.n;
+        self.lost += o.lost;
+        self.sum += o.sum;
+        self.min = self.min.min(o.min);
+        self.max = self.max.max(o.max);
+        self.sketch.merge(&o.sketch);
+    }
+
+    pub fn value(&self, agg: Aggregate) -> Option<f64> {
+        if self.n == 0 {
+            return None;
+        }
+        match agg {
+            Aggregate::Avg => Some(self.sum / self.n as f64),
+            Aggregate::Max => Some(self.max),
+            Aggregate::P50 => self.sketch.quantile(500, self.min, self.max),
+            Aggregate::P95 => self.sketch.quantile(950, self.min, self.max),
+            Aggregate::P99 => self.sketch.quantile(990, self.min, self.max),
+        }
+    }
+
+    pub fn loss(&self) -> f32 {
+        let total = self.n + self.lost;
+        if total == 0 {
+            0.0
+        } else {
+            self.lost as f32 / total as f32
+        }
+    }
+}
+
+/// Raw values in one bucket, aggregated exactly with the same rank rule as the sketch.
+fn exact(values: &[Option<f32>], agg: Aggregate) -> Option<f64> {
+    let mut v: Vec<f64> = values.iter().flatten().map(|x| *x as f64).collect();
+    if v.is_empty() {
+        return None;
+    }
+    let per_mille = match agg {
+        Aggregate::Avg => return Some(v.iter().sum::<f64>() / v.len() as f64),
+        Aggregate::Max => return v.into_iter().reduce(f64::max),
+        Aggregate::P50 => 500,
+        Aggregate::P95 => 950,
+        Aggregate::P99 => 990,
+    };
+    v.sort_by(f64::total_cmp);
+    Some(v[(per_mille * (v.len() as u64 - 1) / 1000) as usize])
 }
 
 /// One row of an mtr-style table.
@@ -83,12 +174,15 @@ impl History {
             let c = Connection::open(p).ok()?;
             c.execute_batch(
                 "PRAGMA journal_mode=WAL;
-                 CREATE TABLE IF NOT EXISTS rollup (
-                   key TEXT NOT NULL, minute INTEGER NOT NULL,
-                   min REAL, mean REAL, max REAL, loss REAL NOT NULL,
+                 CREATE TABLE IF NOT EXISTS key (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+                 CREATE TABLE IF NOT EXISTS minute (
+                   key INTEGER NOT NULL, minute INTEGER NOT NULL,
+                   n INTEGER NOT NULL, lost INTEGER NOT NULL,
+                   sum REAL, min REAL, max REAL, sk BLOB NOT NULL,
                    PRIMARY KEY (key, minute)) WITHOUT ROWID;",
             )
             .ok()?;
+            migrate_v1(&c);
             Some(c)
         });
         Self {
@@ -249,65 +343,94 @@ impl History {
     }
 
     /// Rollups for the part of `[since, until]` older than RAM, then raw RAM points.
-    pub fn series(&self, key: &Key, since: u64, until: u64) -> Vec<Point> {
+    /// `agg` per bucket of `bucket_secs` over `[since, until]`: Minutes from SQLite for the part older
+    /// than RAM (buckets rounded up to whole minutes there), exact raw values from RAM after that.
+    pub fn series(
+        &self,
+        key: &Key,
+        since: u64,
+        until: u64,
+        bucket_secs: u64,
+        agg: Aggregate,
+    ) -> Vec<Point> {
         let ram = self.ram.get(key);
         let ram_start = ram
             .and_then(|q| q.front())
             .map(|(t, _)| *t)
             .unwrap_or(until + 1);
         let mut out = Vec::new();
-        if since < ram_start
-            && let Some(db) = &self.db
-        {
-            let mut stmt = db
-                .prepare_cached(
-                    "SELECT minute, min, mean, max, loss FROM rollup
-                         WHERE key = ?1 AND minute >= ?2 AND minute < ?3 ORDER BY minute",
-                )
-                .expect("static SQL");
-            let rows = stmt.query_map(
-                params![
-                    key.id(),
-                    (since / 60 * 60) as i64,
-                    ram_start.min(until) as i64
-                ],
-                |r| {
-                    let f = |i| {
-                        r.get::<_, Option<f64>>(i)
-                            .map(|v| v.unwrap_or(f64::NAN) as f32)
-                    };
-                    Ok(Point {
-                        at: r.get::<_, i64>(0)? as u64,
-                        min: f(1)?,
-                        mean: f(2)?,
-                        max: f(3)?,
-                        loss: r.get::<_, f64>(4)? as f32,
-                    })
-                },
-            );
-            out.extend(rows.into_iter().flatten().flatten());
+        if since < ram_start {
+            let b = bucket_secs.div_ceil(60).max(1) * 60;
+            let mut cur: Option<(u64, Minute)> = None;
+            for (at, m) in self.minutes(key, since / 60 * 60, ram_start.min(until)) {
+                let start = at / b * b;
+                match &mut cur {
+                    Some((s, acc)) if *s == start => acc.merge(&m),
+                    _ => {
+                        if let Some((s, acc)) = cur.take() {
+                            out.push(point(s, &acc, agg));
+                        }
+                        cur = Some((start, m));
+                    }
+                }
+            }
+            if let Some((s, acc)) = cur {
+                out.push(point(s, &acc, agg));
+            }
         }
         if let Some(q) = ram {
-            out.extend(q.iter().filter(|(t, _)| (since..=until).contains(t)).map(
-                |(t, v)| match v {
-                    Some(v) => Point {
-                        at: *t,
-                        min: *v,
-                        mean: *v,
-                        max: *v,
-                        loss: 0.0,
-                    },
-                    None => Point {
-                        at: *t,
-                        min: f32::NAN,
-                        mean: f32::NAN,
-                        max: f32::NAN,
-                        loss: 1.0,
-                    },
-                },
-            ));
+            let b = bucket_secs.max(1);
+            let mut cur: Option<(u64, Vec<Option<f32>>)> = None;
+            let mut flush = |c: Option<(u64, Vec<Option<f32>>)>| {
+                if let Some((s, vs)) = c {
+                    let lost = vs.iter().filter(|v| v.is_none()).count() as f32 / vs.len() as f32;
+                    out.push(Point {
+                        at: s,
+                        value: exact(&vs, agg).map_or(f32::NAN, |v| v as f32),
+                        loss: lost,
+                    });
+                }
+            };
+            for (t, v) in q.iter().filter(|(t, _)| (since..=until).contains(t)) {
+                let start = t / b * b;
+                match &mut cur {
+                    Some((s, vs)) if *s == start => vs.push(*v),
+                    _ => {
+                        flush(cur.take());
+                        cur = Some((start, vec![*v]));
+                    }
+                }
+            }
+            flush(cur);
         }
         out
+    }
+
+    /// Stored Minutes for `key` in `[from, to)`, ascending.
+    pub fn minutes(&self, key: &Key, from: u64, to: u64) -> Vec<(u64, Minute)> {
+        let Some(db) = &self.db else { return vec![] };
+        let mut stmt = db
+            .prepare_cached(
+                "SELECT m.minute, m.n, m.lost, m.sum, m.min, m.max, m.sk FROM minute m
+                 JOIN key k ON k.id = m.key
+                 WHERE k.name = ?1 AND m.minute >= ?2 AND m.minute < ?3 ORDER BY m.minute",
+            )
+            .expect("static SQL");
+        let rows = stmt.query_map(params![key.id(), from as i64, to as i64], |r| {
+            let sk: Vec<u8> = r.get(6)?;
+            Ok((
+                r.get::<_, i64>(0)? as u64,
+                Minute {
+                    n: r.get::<_, i64>(1)? as u64,
+                    lost: r.get::<_, i64>(2)? as u64,
+                    sum: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                    min: r.get::<_, Option<f64>>(4)?.unwrap_or(f64::INFINITY),
+                    max: r.get::<_, Option<f64>>(5)?.unwrap_or(f64::NEG_INFINITY),
+                    sketch: Sketch::decode(&sk).unwrap_or_default(),
+                },
+            ))
+        });
+        rows.into_iter().flatten().flatten().collect()
     }
 
     fn push(&mut self, key: Key, at: u64, v: Option<f32>) {
@@ -333,29 +456,108 @@ impl History {
         let Some(db) = &mut self.db else { return };
         let Ok(tx) = db.transaction() else { return };
         for (key, q) in &self.ram {
-            let mut buckets: HashMap<u64, Vec<Option<f32>>> = HashMap::new();
+            let mut buckets: BTreeMap<u64, Vec<Option<f32>>> = BTreeMap::new();
             for (t, v) in q.iter().filter(|(t, _)| (from..to).contains(t)) {
                 buckets.entry(t / 60 * 60).or_default().push(*v);
             }
-            for (m, vs) in buckets {
-                let replies: Vec<f32> = vs.iter().flatten().copied().collect();
-                let loss = 1.0 - replies.len() as f64 / vs.len() as f64;
-                let mean = (!replies.is_empty())
-                    .then(|| replies.iter().sum::<f32>() as f64 / replies.len() as f64);
-                let min = replies.iter().copied().reduce(f32::min).map(f64::from);
-                let max = replies.iter().copied().reduce(f32::max).map(f64::from);
-                let _ = tx.execute(
-                    "INSERT OR REPLACE INTO rollup VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![key.id(), m as i64, min, mean, max, loss],
-                );
+            if buckets.is_empty() {
+                continue;
+            }
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO key (name) VALUES (?1)",
+                params![key.id()],
+            );
+            for (at, vs) in buckets {
+                write_minute(&tx, &key.id(), at, &Minute::of(&vs));
             }
         }
         let _ = tx.execute(
-            "DELETE FROM rollup WHERE minute < ?1",
+            "DELETE FROM minute WHERE minute < ?1",
             params![now.saturating_sub(self.rollup_secs) as i64],
         );
         let _ = tx.commit();
     }
+}
+
+fn point(at: u64, m: &Minute, agg: Aggregate) -> Point {
+    Point {
+        at,
+        value: m.value(agg).map_or(f32::NAN, |v| v as f32),
+        loss: m.loss(),
+    }
+}
+
+fn write_minute(c: &Connection, key: &str, at: u64, m: &Minute) {
+    let some = |v: f64| (m.n > 0).then_some(v);
+    let _ = c.execute(
+        "INSERT OR REPLACE INTO minute
+         SELECT id, ?2, ?3, ?4, ?5, ?6, ?7, ?8 FROM key WHERE name = ?1",
+        params![
+            key,
+            at as i64,
+            m.n as i64,
+            m.lost as i64,
+            some(m.sum),
+            some(m.min),
+            some(m.max),
+            m.sketch.encode()
+        ],
+    );
+}
+
+/// v1.x stored min/mean/max/loss per minute. Each becomes a Minute holding its mean once, so old
+/// history still graphs (percentiles of it read as the mean) until it ages out of the rollup window.
+/// key, minute, min, mean, max, loss
+type V1Row = (String, i64, Option<f64>, Option<f64>, Option<f64>, f64);
+
+fn migrate_v1(c: &Connection) {
+    let old: Vec<V1Row> = c
+        .prepare("SELECT key, minute, min, mean, max, loss FROM rollup")
+        .and_then(|mut s| {
+            s.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    if old.is_empty() {
+        let _ = c.execute_batch("DROP TABLE IF EXISTS rollup;");
+        return;
+    }
+    let Ok(tx) = c.unchecked_transaction() else {
+        return;
+    };
+    for (key, at, min, mean, max, loss) in old {
+        let _ = tx.execute("INSERT OR IGNORE INTO key (name) VALUES (?1)", params![key]);
+        let m = match mean {
+            Some(mean) => {
+                let mut sketch = Sketch::default();
+                sketch.add(mean);
+                Minute {
+                    n: 1,
+                    lost: (loss / (1.0 - loss).max(1e-9)).round() as u64,
+                    sum: mean,
+                    min: min.unwrap_or(mean),
+                    max: max.unwrap_or(mean),
+                    sketch,
+                }
+            }
+            None => Minute {
+                lost: 1,
+                ..Minute::default()
+            },
+        };
+        write_minute(&tx, &key, at as u64, &m);
+    }
+    let _ = tx.execute_batch("DROP TABLE rollup;");
+    let _ = tx.commit();
 }
 
 /// Lowest-decile RTT: what the path does when nothing is queued, so a long congestion episode can't become "normal".
@@ -444,13 +646,54 @@ mod tests {
                 Some((t % 60) as f32)
             }
         });
-        let pts = h.series(&Key::Probe(probe()), 6000, 6600);
+        let key = Key::Probe(probe());
+        let pts = h.series(&key, 6000, 6600, 60, Aggregate::Max);
         let first = pts.first().unwrap();
         assert_eq!(first.at, 6000);
         assert_eq!(first.loss, 1.0);
+        assert!(first.value.is_nan());
         let rolled = pts.iter().find(|p| p.at == 6120).unwrap();
-        assert_eq!((rolled.min, rolled.max), (0.0, 59.0));
-        assert!(pts.last().unwrap().at >= 6599);
+        assert_eq!(rolled.value, 59.0);
+        assert!(pts.last().unwrap().at >= 6540);
+        let two = h.series(&key, 6060, 6180, 120, Aggregate::Avg);
+        assert_eq!(two[0].at, 6000);
+        assert_eq!(two[1].at, 6120);
+        assert_eq!(two[1].value, 29.5);
+        let p95 = h.series(&key, 6120, 6180, 60, Aggregate::P95)[0].value;
+        assert!((p95 - 56.0).abs() / 56.0 <= 1.0 / 65.0, "{p95}");
+        drop(h);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ram_buckets_are_exact() {
+        let mut h = History::open(None, 15, 7);
+        feed(&mut h, 1000, 1010, |t| Some((t - 1000) as f32));
+        let pts = h.series(&Key::Probe(probe()), 1000, 1009, 5, Aggregate::P50);
+        assert_eq!(pts.len(), 2);
+        assert_eq!((pts[0].at, pts[0].value), (1000, 2.0));
+        assert_eq!((pts[1].at, pts[1].value), (1005, 7.0));
+    }
+
+    #[test]
+    fn v1_rollups_migrate() {
+        let path = std::env::temp_dir().join(format!("bg-history-v1-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE rollup (key TEXT NOT NULL, minute INTEGER NOT NULL,
+                   min REAL, mean REAL, max REAL, loss REAL NOT NULL,
+                   PRIMARY KEY (key, minute)) WITHOUT ROWID;
+                 INSERT INTO rollup VALUES ('probe:icmp 1.1.1.1', 6000, 10, 12, 20, 0.5);",
+            )
+            .unwrap();
+        }
+        let h = History::open(Some(&path), 1, 7);
+        let m = h.minutes(&Key::Probe(probe()), 6000, 6060);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].1.n, m[0].1.lost, m[0].1.max), (1, 1, 20.0));
+        assert_eq!(m[0].1.value(Aggregate::Avg), Some(12.0));
         drop(h);
         let _ = std::fs::remove_file(&path);
     }
