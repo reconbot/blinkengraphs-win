@@ -12,7 +12,7 @@ Live CPU, memory, disk, network and latency graphs in the Windows 11 taskbar, in
 | Memory | commit charge, hard faults | physical, compressed, top processes |
 | Network | down/up on the followed adapter | per adapter, errors |
 | Disk | active time % | MB/s, response time, queue |
-| Latency | RTT + loss to 1.1.1.1 | ICMP/TCP/DNS probes to gateway, 1.1.1.1, 8.8.8.8; per-hop trace |
+| Latency | RTT + loss to 1.1.1.1 | ICMP/TCP/DNS probes to gateway, 1.1.1.1, 9.9.9.9; per-hop trace |
 
 Every metric, probe and interval is configurable. Nothing needs Administrator; an optional companion service adds per-process network bytes and UDP hop traces.
 
