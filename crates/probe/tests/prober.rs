@@ -38,9 +38,10 @@ fn next_probe(rx: &Receiver<Event>) -> ProbeResult {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(left).expect("a probe result") {
-            Event::Probe(r) => return r,
-            _ => continue,
+        if let Event::Round(mut r) = rx.recv_timeout(left).expect("a probe result")
+            && !r.probes.is_empty()
+        {
+            return r.probes.remove(0);
         }
     }
 }
@@ -127,7 +128,9 @@ fn icmp_to_localhost_replies() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        if let Event::Hop(h) = rx.recv_timeout(left).expect("a hop") {
+        if let Event::Round(r) = rx.recv_timeout(left).expect("a hop")
+            && let Some(h) = r.hops.first()
+        {
             assert_eq!(h.ttl, 1);
             assert!(h.reached);
             break;

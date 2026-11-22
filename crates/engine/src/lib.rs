@@ -39,6 +39,10 @@ pub enum Command {
     PanelOpen(bool),
     /// Save what a restart would lose, reply on the channel, then stop.
     Shutdown(Sender<()>),
+    /// The machine is about to sleep, at this Unix time: a Pause begins.
+    Suspend(f64),
+    /// The machine woke at this Unix time: measuring resumes, and the Pause ends a settle time later.
+    Resume(f64),
 }
 
 pub struct Engine {
@@ -96,6 +100,11 @@ impl Engine {
         let _ = self.commands.send(c);
     }
 
+    /// A handle for threads that send commands themselves, such as power notifications.
+    pub fn commands(&self) -> Sender<Command> {
+        self.commands.clone()
+    }
+
     /// Waits up to `timeout` for the engine to save history; a stuck engine must not block Quit.
     pub fn shutdown(&self, timeout: Duration) -> bool {
         let (tx, rx) = channel();
@@ -148,6 +157,7 @@ fn adapter(c: &Config) -> AdapterChoice {
 /// `order` is Probe Group order, so a tie names the Target listed first; Probes absent from
 /// it follow. Probes with an empty window have no stats and are left out.
 pub fn diagnose(h: &History, net: &Network, now: u64, order: &[Probe]) -> Vec<Finding> {
+    let since_pause_s = h.since_pause_s(now as f64);
     let mut probes: Vec<(Probe, ProbeStat)> = h
         .probes()
         .into_iter()
@@ -174,7 +184,7 @@ pub fn diagnose(h: &History, net: &Network, now: u64, order: &[Probe]) -> Vec<Fi
         path_up: net.path_up,
         via_vpn: net.via_vpn,
         captive_portal: net.captive_portal,
-        since_pause_s: None,
+        since_pause_s,
         window_s: h.window_s(),
     })
 }
@@ -198,7 +208,11 @@ fn run<S: Sensors>(m: &mut Monitor<S>, commands: Receiver<Command>, wake: impl F
             .min(Duration::from_millis(250));
         match commands.recv_timeout(timeout) {
             Ok(Command::Shutdown(done)) => {
-                m.shared.lock().unwrap().history.close(model::now());
+                let mut s = m.shared.lock().unwrap();
+                // Not measuring from here to the next launch: a Pause.
+                s.history.begin_pause(model::now_f64());
+                s.history.close(model::now());
+                drop(s);
                 let _ = done.send(());
                 return;
             }
@@ -206,7 +220,7 @@ fn run<S: Sensors>(m: &mut Monitor<S>, commands: Receiver<Command>, wake: impl F
             Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
         }
-        if m.tick(Instant::now(), model::now()) {
+        if m.tick(Instant::now(), model::now_f64()) {
             wake();
         }
     }
@@ -220,7 +234,13 @@ struct Monitor<S> {
     events: Receiver<Event>,
     idle: IdleCheck,
     panel_open: bool,
-    paused: bool,
+    /// Resting while idle (display off, locked, screen saver).
+    resting: bool,
+    /// Between a suspend and the resume.
+    suspended: bool,
+    /// The last reading of `Sensors::slept_s`, and when it was taken.
+    slept: Option<(f64, f64)>,
+    settle_s: f64,
     next_sample: Instant,
     next_procs: Instant,
     next_adapters: Instant,
@@ -238,7 +258,10 @@ impl<S: Sensors> Monitor<S> {
             events,
             idle,
             panel_open: false,
-            paused: false,
+            resting: false,
+            suspended: false,
+            slept: None,
+            settle_s: config::defaults::get().history.settle_s,
             next_sample: now,
             next_procs: now,
             next_adapters: now,
@@ -259,21 +282,85 @@ impl<S: Sensors> Monitor<S> {
             }
             Command::PanelOpen(open) => self.panel_open = open,
             Command::Shutdown(_) => {}
+            Command::Suspend(at) => {
+                if self.measuring() {
+                    self.stop(at);
+                }
+                self.suspended = true;
+            }
+            Command::Resume(at) => {
+                // The time asleep is this Pause's, not a missed one. A resume with no suspend
+                // before it (a critical one) keeps the reading, so the next tick finds the sleep.
+                if self.suspended {
+                    self.slept = None;
+                }
+                self.suspended = false;
+                if self.measuring() {
+                    self.start(at);
+                }
+            }
         }
+    }
+
+    fn measuring(&self) -> bool {
+        !self.resting && !self.suspended
+    }
+
+    /// Measuring stops at `at`: a Pause begins and the Prober rests.
+    fn stop(&mut self, at: f64) {
+        self.prober.set_paused(true);
+        let mut s = self.shared.lock().unwrap();
+        s.history.begin_pause(at);
+        s.paused = true;
+    }
+
+    /// Measuring resumes at `at`; the Pause lasts the settle time more, while the network
+    /// comes back (spec `rules/history.md`, Pauses).
+    fn start(&mut self, at: f64) {
+        self.prober.set_paused(false);
+        let mut s = self.shared.lock().unwrap();
+        s.history.end_pause(at + self.settle_s);
+        s.paused = false;
+    }
+
+    /// Records a Round's results, unless a Pause cut it.
+    fn round(&mut self, r: probe::Round) {
+        let mut s = self.shared.lock().unwrap();
+        if s.history.cut(r.start, r.end) {
+            return;
+        }
+        for p in &r.probes {
+            s.history.record_probe(p);
+        }
+        for h in &r.hops {
+            s.history.record_hop(h);
+        }
+    }
+
+    /// A suspend Windows never announced, such as a critical one, shows as time asleep that
+    /// grew since the last tick; that stretch becomes a Pause after the fact.
+    fn catch_missed_sleep(&mut self, wall: f64) {
+        let slept = self.sensors.slept_s();
+        if let Some((before, last)) = self.slept
+            && slept - before > 1.0
+            && self.measuring()
+        {
+            let mut s = self.shared.lock().unwrap();
+            s.history.begin_pause(last);
+            s.history.end_pause(wall + self.settle_s);
+        }
+        self.slept = Some((slept, wall));
     }
 
     /// Records Probe results, then, when a Sample is due, takes it and updates the Verdict.
     /// True when Surfaces should redraw.
-    fn tick(&mut self, now: Instant, at: u64) -> bool {
+    fn tick(&mut self, now: Instant, wall: f64) -> bool {
+        let at = wall as u64;
+        self.catch_missed_sleep(wall);
         let events: Vec<Event> = self.events.try_iter().collect();
-        if !events.is_empty() {
-            let mut s = self.shared.lock().unwrap();
-            for e in events {
-                match e {
-                    Event::Probe(r) => s.history.record_probe(&r),
-                    Event::Hop(h) => s.history.record_hop(&h),
-                    Event::Resolved { .. } => {}
-                }
+        for e in events {
+            if let Event::Round(r) = e {
+                self.round(r);
             }
         }
         if now < self.next_sample {
@@ -282,13 +369,17 @@ impl<S: Sensors> Monitor<S> {
         let every = |ms: u64| Duration::from_millis(ms.max(MIN_INTERVAL_MS));
         self.next_sample = now + every(self.config.system_interval_ms);
 
-        let pause = self.config.pause_when_idle && (self.idle)();
-        if pause != self.paused {
-            self.paused = pause;
-            self.prober.set_paused(pause);
-            self.shared.lock().unwrap().paused = pause;
+        let rest = self.config.pause_when_idle && (self.idle)();
+        if rest != self.resting {
+            let was = self.measuring();
+            self.resting = rest;
+            match (was, self.measuring()) {
+                (true, false) => self.stop(wall),
+                (false, true) => self.start(wall),
+                _ => {}
+            }
         }
-        if pause {
+        if !self.measuring() {
             return false;
         }
         let Some(mut sample): Option<Sample> = self.sensors.sample() else {

@@ -87,10 +87,9 @@ fn start(net: Net, probes: Vec<Probe>, traces: Vec<Probe>) -> (Prober, Receiver<
 fn first_tick(rx: &Receiver<Event>) -> (Vec<ProbeResult>, Vec<HopResult>) {
     let (mut probes, mut hops) = (vec![], vec![]);
     while let Ok(e) = rx.recv_timeout(Duration::from_millis(500)) {
-        match e {
-            Event::Probe(r) => probes.push(r),
-            Event::Hop(h) => hops.push(h),
-            Event::Resolved { .. } => {}
+        if let Event::Round(r) = e {
+            probes.extend(r.probes);
+            hops.extend(r.hops);
         }
     }
     (probes, hops)
@@ -160,4 +159,27 @@ fn icmp_probe_and_trace_share_one_batch_and_the_trace_stops_at_the_target() {
     assert_eq!(ttls, [1, 2, HOPS]);
     assert!(hops.last().unwrap().reached);
     assert_eq!(hops[0].addr, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+}
+
+#[test]
+fn a_round_arrives_whole_stamped_with_its_start_and_end() {
+    let icmp = p(Protocol::Icmp, Target::Addr(V4));
+    let tcp = p(Protocol::Tcp(443), Target::Addr(V4));
+    let (_prober, rx) = start(
+        Net {
+            v4: true,
+            v6: false,
+        },
+        vec![icmp, tcp],
+        vec![],
+    );
+    let round = loop {
+        if let Event::Round(r) = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break r;
+        }
+    };
+    assert_eq!(round.probes.len(), 2);
+    assert!(round.start <= round.end);
+    assert_eq!(round.at, round.start.floor() as u64);
+    assert!(round.probes.iter().all(|r| r.at == round.at));
 }

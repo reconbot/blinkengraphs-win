@@ -345,6 +345,14 @@ pub struct ProbeStat {
     pub jitter_ms: Option<f32>,
 }
 
+/// Unix time in fractional seconds, for Round and Pause bounds (spec `rules/history.md`).
+pub fn now_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

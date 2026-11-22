@@ -85,3 +85,25 @@ mod smoke {
         eprintln!("{s:?}\n{procs:#?}\n{:#?}", c.adapters());
     }
 }
+
+/// Seconds the machine has spent asleep since boot: interrupt time counts sleep and the
+/// unbiased one doesn't (research 07 §1). A jump between two readings is a suspend that sent
+/// no notice, such as a critical one. 0 off Windows.
+pub fn slept_s() -> f64 {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::WindowsProgramming::{
+            QueryInterruptTime, QueryUnbiasedInterruptTime,
+        };
+        let (mut biased, mut unbiased) = (0u64, 0u64);
+        // Unbiased first: interrupt time read after it can only be later, never less asleep.
+        unsafe {
+            QueryUnbiasedInterruptTime(&mut unbiased);
+            QueryInterruptTime(&mut biased);
+        }
+        // Both count 100 ns units.
+        biased.saturating_sub(unbiased) as f64 / 1e7
+    }
+    #[cfg(not(windows))]
+    0.0
+}

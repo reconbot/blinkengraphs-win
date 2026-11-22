@@ -67,10 +67,22 @@ pub struct ProbeGroup {
     pub traces: Vec<Probe>,
 }
 
+/// Everything one Round measured. It arrives whole, once its last Probe ends, so a Round a
+/// Pause cut can be dropped (spec `rules/history.md`, Pauses).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Round {
+    /// Whole Unix seconds when the Round started; every result carries it.
+    pub at: u64,
+    /// Unix seconds when the Round started and when its last Probe ended.
+    pub start: f64,
+    pub end: f64,
+    pub probes: Vec<ProbeResult>,
+    pub hops: Vec<HopResult>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    Probe(ProbeResult),
-    Hop(HopResult),
+    Round(Round),
     Resolved {
         target: Target,
         addr: Option<IpAddr>,
@@ -256,7 +268,9 @@ impl Ticker {
         if !v4_up && !v6_up {
             return;
         }
-        let at = model::now();
+        let start = model::now_f64();
+        let at = start as u64;
+        let results: Mutex<(Vec<ProbeResult>, Vec<HopResult>)> = Mutex::default();
         let mut addrs: HashMap<&Target, Option<IpAddr>> = HashMap::new();
         for p in self.group.probes.iter().chain(&self.group.traces) {
             if !addrs.contains_key(&p.target) {
@@ -275,7 +289,7 @@ impl Ticker {
                 at,
                 rtt_ms: rtt.map(net::ms),
             };
-            shared.emit(generation, Event::Probe(result));
+            results.lock().unwrap().0.push(result);
         };
         let emit_hops = |trace: &Probe, hops: Vec<Hop>| {
             for h in hops {
@@ -287,7 +301,7 @@ impl Ticker {
                     rtt_ms: h.rtt_ms,
                     reached: h.reached,
                 };
-                shared.emit(generation, Event::Hop(hop));
+                results.lock().unwrap().1.push(hop);
             }
         };
 
@@ -356,6 +370,17 @@ impl Ticker {
                 &emit_hops,
             );
         });
+        let (probes, hops) = results.into_inner().unwrap();
+        if !probes.is_empty() || !hops.is_empty() {
+            let round = Round {
+                at,
+                start,
+                end: model::now_f64(),
+                probes,
+                hops,
+            };
+            shared.emit(generation, Event::Round(round));
+        }
     }
 }
 
