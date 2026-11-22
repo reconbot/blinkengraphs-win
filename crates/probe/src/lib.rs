@@ -192,10 +192,19 @@ impl Shared {
     }
 }
 
+/// When the round after one that began `begin` into the schedule is due: the next tick of the
+/// grid `k × interval`. A round that finds it already passed starts at once, so missed ticks
+/// are skipped rather than queued (spec `rules/history.md`, Timing).
+pub fn next_round(interval: Duration, begin: Duration) -> Duration {
+    let k = begin.as_nanos() / interval.as_nanos().max(1);
+    interval * (k as u32 + 1)
+}
+
 fn run(shared: &Shared, generation: u64, group: ProbeGroup) {
     let interval = group.interval.max(MIN_INTERVAL);
     let mut ticker = Ticker::new(group, &shared.limits);
-    let mut next = Instant::now();
+    let mut start = Instant::now();
+    let mut next = start;
     loop {
         {
             let mut c = shared.control.lock().unwrap();
@@ -205,7 +214,8 @@ fn run(shared: &Shared, generation: u64, group: ProbeGroup) {
                 }
                 if c.paused {
                     c = shared.wake.wait(c).unwrap();
-                    next = Instant::now();
+                    start = Instant::now();
+                    next = start;
                     continue;
                 }
                 let now = Instant::now();
@@ -215,9 +225,9 @@ fn run(shared: &Shared, generation: u64, group: ProbeGroup) {
                 c = shared.wake.wait_timeout(c, next - now).unwrap().0;
             }
         }
+        let begin = Instant::now();
         ticker.tick(shared, generation, interval.min(shared.limits.max_timeout));
-        next += interval;
-        next = next.max(Instant::now());
+        next = start + next_round(interval, begin - start);
     }
 }
 

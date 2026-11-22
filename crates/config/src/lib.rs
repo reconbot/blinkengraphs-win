@@ -387,6 +387,7 @@ impl Config {
             rollup_days: self.history.rollup_days,
             hop_window: d.hop_trace.hop_window,
             recent_window_s: d.history.recent_window_s,
+            minute_grace_s: d.max_timeout_ms.div_ceil(1000) + 1,
         }
     }
 }

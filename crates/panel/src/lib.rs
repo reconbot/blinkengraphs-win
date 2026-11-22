@@ -405,14 +405,11 @@ impl Panel {
             key,
             view.now.saturating_sub(secs),
             view.now,
-            (secs / GRAPH_POINTS).max(1),
+            history::bucket_width(secs),
             self.graph_aggregate,
         )
     }
 }
-
-/// Buckets per graph: about one per pixel of a half-width card.
-const GRAPH_POINTS: u64 = 240;
 
 fn latency_probes(h: &History, all: bool) -> Vec<Probe> {
     let mut v: Vec<Probe> = h
@@ -718,26 +715,49 @@ fn aggregate_tag(pu: &mut egui_plot::PlotUi, w: Window) {
     );
 }
 
-fn to_line(
-    name: impl Into<String>,
+/// One line per run of adjacent buckets with values: a missing bucket or one with only losses
+/// breaks the line rather than joining across it (spec `rules/history.md`, Drawing).
+fn to_lines(
+    name: &str,
     color: Color32,
     pts: &[Point],
     fill: bool,
     w: Window,
-) -> Line<'static> {
-    let xy: Vec<[f64; 2]> = pts
-        .iter()
-        .filter(|p| p.value.is_finite())
-        .map(|p| [p.at as f64 - w.now, p.value as f64])
-        .collect();
-    let line = Line::new(name, PlotPoints::from(xy))
-        .color(color)
-        .width(1.5);
-    if fill {
-        line.fill(0.0).fill_alpha(0.18)
-    } else {
-        line
+) -> Vec<Line<'static>> {
+    let mut runs: Vec<Vec<[f64; 2]>> = Vec::new();
+    let mut prev: Option<&Point> = None;
+    for p in pts {
+        let joins = prev.is_some_and(|q| q.value.is_finite() && p.at <= q.at + q.secs);
+        if p.value.is_finite() {
+            if !joins {
+                runs.push(Vec::new());
+            }
+            runs.last_mut()
+                .unwrap()
+                .push([p.at as f64 - w.now, p.value as f64]);
+        }
+        prev = Some(p);
     }
+    runs.into_iter()
+        .map(|mut xy| {
+            // A lone bucket draws as a level segment across its width; one point draws nothing.
+            if let [[x, y]] = xy[..] {
+                let width = pts
+                    .iter()
+                    .find(|p| p.at as f64 - w.now == x)
+                    .map_or(1.0, |p| p.secs as f64);
+                xy.push([x + width, y]);
+            }
+            let line = Line::new(name.to_string(), PlotPoints::from(xy))
+                .color(color)
+                .width(1.5);
+            if fill {
+                line.fill(0.0).fill_alpha(0.18)
+            } else {
+                line
+            }
+        })
+        .collect()
 }
 
 fn sparkplot(
@@ -759,7 +779,9 @@ fn sparkplot(
         unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
         aggregate_tag(pu, w);
         for (name, color, pts) in &series {
-            pu.line(to_line(*name, *color, pts, true, w));
+            for l in to_lines(name, *color, pts, true, w) {
+                pu.line(l);
+            }
         }
     });
 }
@@ -778,7 +800,9 @@ fn multiplot(
             unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
             aggregate_tag(pu, w);
             for (name, color, pts) in series {
-                pu.line(to_line(name.clone(), *color, pts, false, w));
+                for l in to_lines(name, *color, pts, false, w) {
+                    pu.line(l);
+                }
                 let lost: Vec<[f64; 2]> = pts
                     .iter()
                     .filter(|p| p.loss > 0.0)
