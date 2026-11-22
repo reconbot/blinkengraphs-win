@@ -1,8 +1,8 @@
-# Clicks through the installer's dialogs with UI Automation, screenshotting each one.
+# Clicks through the installer's dialogs (found with UI Automation, clicked with button messages), screenshotting each one.
 # Usage: gui-test.ps1 -Msi <path> -Out <dir>. Takes the Just me path so no UAC prompt appears.
 param([Parameter(Mandatory)][string]$Msi, [Parameter(Mandatory)][string]$Out)
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, System.Windows.Forms
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
 $A = [System.Windows.Automation.AutomationElement]
 $Scope = [System.Windows.Automation.TreeScope]
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -11,36 +11,34 @@ function Setup-Window {
   $A::RootElement.FindFirst($Scope::Children,
     (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'blinkengraphs Setup')))
 }
-$CT = [System.Windows.Automation.ControlType]
-# Win32 labels carry & mnemonics; compare without them. A label and its control can share a name, so match the type.
-function Find($win, [string]$like, $type = $CT::Button) {
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class Win32 {
+  [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+}
+'@
+# Windows Installer's dialog controls reach UI Automation only as Panes with no patterns,
+# but each is a real Win32 button, so drive them with button messages by handle.
+$BM_GETCHECK = 0x00F0; $BM_CLICK = 0x00F5
+function Find($win, [string]$like) {
   foreach ($e in $win.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
-    if ($e.Current.ControlType -eq $type -and ($e.Current.Name -replace '&', '') -like $like) { return $e }
+    if (($e.Current.Name -replace '&', '') -like $like) { return $e }
   }
 }
 function Enabled($e) { $e -and $e.Current.IsEnabled }
-# Windows Installer dialogs don't always act on UI Automation patterns, so fall back to the keyboard.
-function Press($e, [string]$keys) {
-  $e.SetFocus(); Start-Sleep -Milliseconds 200
-  [System.Windows.Forms.SendKeys]::SendWait($keys)
+function Send($e, [int]$msg) {
+  [Win32]::SetForegroundWindow([IntPtr]$win.Current.NativeWindowHandle) | Out-Null
+  [Win32]::SendMessage([IntPtr]$e.Current.NativeWindowHandle, $msg, [IntPtr]::Zero, [IntPtr]::Zero)
 }
-function Click($e) {
-  Write-Host "click '$($e.Current.Name)'"
-  $p = $null
-  if ($e.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$p)) { $p.Invoke() }
-  else { Press $e '{ENTER}' }
-}
+function Click($e) { Write-Host "click '$($e.Current.Name)'"; Send $e $BM_CLICK | Out-Null }
 function Toggle-To($e, [bool]$on) {
-  $p = $null
-  if (-not $e.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$p)) { return }
-  if (($p.Current.ToggleState -eq 'On') -eq $on) { return }
-  Write-Host "toggle '$($e.Current.Name)' to $on"
-  $p.Toggle(); Start-Sleep -Milliseconds 300
-  if (($p.Current.ToggleState -eq 'On') -ne $on) { Press $e ' ' }
+  if (((Send $e $BM_GETCHECK).ToInt64() -eq 1) -ne $on) { Write-Host "toggle '$($e.Current.Name)' to $on"; Send $e $BM_CLICK | Out-Null }
 }
 function Dump($win) {
   foreach ($e in $win.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
-    Write-Host ("  {0,-12} enabled={1,-5} '{2}'" -f $e.Current.ControlType.ProgrammaticName.Replace('ControlType.', ''), $e.Current.IsEnabled, $e.Current.Name)
+    Write-Host ("  hwnd={0,-8} enabled={1,-5} '{2}'" -f $e.Current.NativeWindowHandle, $e.Current.IsEnabled, ($e.Current.Name -split "`n")[0])
   }
 }
 function Shot($win, [string]$name) {
@@ -66,8 +64,8 @@ foreach ($i in 1..120) {
   $finish = Find $win 'Finish'
   if ($names -ne $last) {
     $n++
-    $label = if ($finish) { 'finish' } elseif (Find $win 'Install just for you*' $CT::RadioButton) { 'scope' }
-             elseif (Find $win 'I accept the terms*' $CT::CheckBox) { 'welcome' } elseif (Enabled (Find $win 'Install')) { 'ready' }
+    $label = if ($finish) { 'finish' } elseif (Find $win 'Install just for you*') { 'scope' }
+             elseif (Find $win 'I accept the terms*') { 'welcome' } elseif (Enabled (Find $win 'Install')) { 'ready' }
              else { 'progress' }
     Shot $win ('installer-{0:d2}-{1}' -f $n, $label)
     Dump $win
@@ -76,15 +74,14 @@ foreach ($i in 1..120) {
     throw "stuck on '$label': its actions had no effect"
   }
   if ($finish) {
-    $launch = Find $win 'Launch blinkengraphs' $CT::CheckBox
+    $launch = Find $win 'Launch blinkengraphs'
     if ($launch) { Toggle-To $launch $false }
     Click $finish; break
   }
-  $eula = Find $win 'I accept the terms*' $CT::CheckBox
+  $eula = Find $win 'I accept the terms*'
   if ($eula) { Toggle-To $eula $true }
-  $justMe = Find $win 'Install just for you*' $CT::RadioButton
-  $sel = $null
-  if ($justMe -and $justMe.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sel)) { $sel.Select() }
+  $justMe = Find $win 'Install just for you*'
+  if ($justMe -and (Send $justMe $BM_GETCHECK).ToInt64() -ne 1) { Click $justMe }
   foreach ($b in 'Advanced', 'Next', 'Install') {
     $e = Find $win $b
     if (Enabled $e) { Click $e; break }
