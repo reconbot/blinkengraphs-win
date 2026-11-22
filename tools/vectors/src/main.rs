@@ -1,5 +1,6 @@
 //! Usage: vectors <out_dir>
 //! Writes the spec repo's test vectors, design tokens and fixture scenarios from this reference implementation.
+//! `defaults.json` is not generated: the spec owns it, and `config::defaults` embeds it.
 
 use model::{Metric, Probe, ProbeStat, Protocol, Sample, Target};
 use serde_json::{Value, json};
@@ -16,6 +17,7 @@ fn main() {
         "vectors/probe-stats",
         "vectors/hop-trace",
         "vectors/sketch",
+        "vectors/defaults",
         "tokens",
         "fixtures/scenarios",
     ] {
@@ -36,7 +38,7 @@ fn main() {
     for (name, v) in hop_traces() {
         write(out, &format!("vectors/hop-trace/{name}.json"), &v);
     }
-    write(out, "defaults.json", &defaults());
+    write(out, "vectors/defaults/merge.json", &defaults_merge());
     for (name, v) in sketch_vectors() {
         write(out, &format!("vectors/sketch/{name}.json"), &v);
     }
@@ -436,32 +438,37 @@ fn latency_scale() -> Value {
     })
 }
 
-fn defaults() -> Value {
-    let c = config::Config::default();
-    let g = &c.groups[0];
+fn defaults_merge() -> Value {
+    let cases = [
+        (
+            "objects merge key by key",
+            json!({"history": {"ram_minutes": 15, "rollup_days": 7}, "system_interval_ms": 1000}),
+            json!({"history": {"rollup_days": 30}}),
+        ),
+        (
+            "arrays and scalars replace whole",
+            json!({"targets": [{"target": "1.1.1.1"}, {"target": "9.9.9.9"}], "max_timeout_ms": 1000}),
+            json!({"targets": [{"target": "1.1.1.1"}], "max_timeout_ms": 500}),
+        ),
+        (
+            "null removes a key; new keys are added",
+            json!({"system_interval_ms": 1000, "dns_query_name": "cloudflare.com"}),
+            json!({"system_interval_ms": null, "battery_saver": true}),
+        ),
+        (
+            "an empty override changes nothing",
+            json!({"probe_group": {"name": "Default", "latency_ms": 1000}}),
+            json!({}),
+        ),
+    ];
     json!({
-        "description": "Defaults of the Windows reference implementation. Probe intervals are in ms; a Probe's timeout is min(interval, max_timeout_ms).",
-        "primary": c.primary,
-        "probe_group": {
-            "name": g.name,
-            "latency_ms": g.latency_ms,
-            "dns_ms": g.dns_ms,
-            "trace_ms": g.trace_ms,
-            "targets": g.targets,
-        },
-        "max_timeout_ms": probe::MAX_TIMEOUT.as_millis() as u64,
-        "dns_query_name": probe::QUERY_NAME,
-        "hop_trace": {
-            "max_ttl": probe::MAX_TTL,
-            "full_sweep_every_s": probe::FULL_SWEEP_EVERY.as_secs(),
-            "hop_window": history::HOP_WINDOW,
-        },
-        "history": {
-            "ram_minutes": c.history.ram_minutes,
-            "rollup_days": c.history.rollup_days,
-            "recent_window_s": history::RECENT_SECS,
-        },
-        "system_interval_ms": c.system_interval_ms,
+        "description": "Merging a platform's defaults.override.json over the spec's defaults.json (rules/defaults.md).",
+        "cases": cases.into_iter().map(|(name, base, over)| json!({
+            "name": name,
+            "base": base,
+            "override": over,
+            "expected": config::defaults::merge(base.clone(), over.clone()),
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -574,4 +581,23 @@ fn sketch_vectors() -> Vec<(&'static str, Value)> {
             }),
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    /// These defaults are still compile-time constants in the engine crates, so an
+    /// override of them takes effect only once those crates read `config::defaults`.
+    #[test]
+    fn engine_constants_match_the_merged_defaults() {
+        let d = config::defaults::get();
+        assert_eq!(probe::MAX_TIMEOUT.as_millis() as u64, d.max_timeout_ms);
+        assert_eq!(probe::QUERY_NAME, d.dns_query_name);
+        assert_eq!(probe::MAX_TTL, d.hop_trace.max_ttl);
+        assert_eq!(
+            probe::FULL_SWEEP_EVERY.as_secs(),
+            d.hop_trace.full_sweep_every_s
+        );
+        assert_eq!(history::HOP_WINDOW, d.hop_trace.hop_window);
+        assert_eq!(history::RECENT_SECS, d.history.recent_window_s);
+    }
 }

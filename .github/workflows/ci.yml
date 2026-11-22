@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           components: rustfmt, clippy
@@ -25,23 +27,25 @@ jobs:
       - run: cargo test
 
   # The spec's generated files come from this code, so conformance is: regenerate, then expect no diff.
+  # The `spec` submodule is the pin; it must sit on a spec release tag.
   spec:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - id: pin
-        run: echo "ref=$(cat SPEC_VERSION)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: reconbot/blinkengraphs
-          ref: ${{ steps.pin.outputs.ref }}
-          path: spec
+          submodules: true
+          fetch-depth: 0
+      - id: pin
+        name: spec submodule is on a release tag
+        run: |
+          git -C spec fetch --tags --quiet
+          echo "ref=$(git -C spec describe --tags --exact-match HEAD)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo run -p vectors -- generated
       - name: conforms to spec ${{ steps.pin.outputs.ref }}
         run: |
-          for p in vectors fixtures tokens defaults.json; do
+          for p in vectors fixtures tokens; do
             diff -ru "spec/$p" "generated/$p"
           done
 
@@ -52,6 +56,8 @@ jobs:
         target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.target }}
