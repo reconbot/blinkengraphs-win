@@ -63,6 +63,8 @@ foreach ($i in 1..120) {
     ForEach-Object { $_.Current.Name }) -join '|'
   $finish = Find $win 'Finish'
   if ($names -ne $last) {
+    # Between dialogs the window can report an empty rectangle; catch it on the next pass.
+    if ($win.Current.BoundingRectangle.Width -lt 1) { continue }
     $n++
     $label = if ($finish) { 'finish' } elseif (Find $win 'Install just for you*') { 'scope' }
              elseif (Find $win 'I accept the terms*') { 'welcome' } elseif (Enabled (Find $win 'Install')) { 'ready' }
