@@ -1,10 +1,10 @@
 name: installer
 on:
   pull_request:
-    paths: [installer/**, tools/brand/**, spec, .github/workflows/installer.yml]
+    paths: [installer/**, tools/brand/**, app/**, spec, .github/workflows/installer.yml]
   push:
     branches: [main]
-    paths: [installer/**, tools/brand/**, spec, .github/workflows/installer.yml]
+    paths: [installer/**, tools/brand/**, app/**, spec, .github/workflows/installer.yml]
   workflow_dispatch:
 
 concurrency:
@@ -50,6 +50,39 @@ jobs:
             if (Test-Path "$($c.dir)\blinkengraphs.exe") { throw "$($c.name): uninstall left the exe" }
             "$($c.name): installed to $($c.dir), Run = $run, uninstalled" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           }
+      - name: build a newer MSI for the upgrade test
+        shell: bash
+        run: installer/build.sh x64 target/release/blinkengraphs.exe dist-next 255.0.0
+      - name: silent upgrade closes the running app and relaunches it
+        shell: pwsh
+        run: |
+          $old = (Resolve-Path dist/blinkengraphs-x64.msi).Path
+          $new = (Resolve-Path dist-next/blinkengraphs-x64.msi).Path
+          $scope = 'MSIINSTALLPERUSER=1 ALLUSERS=2'
+          function Msi([string]$a) {
+            $p = Start-Process msiexec -ArgumentList $a -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content msi.log -Tail 60 -ErrorAction SilentlyContinue; throw "msiexec $a exited $($p.ExitCode)" }
+          }
+          Msi "/i `"$old`" /qn /norestart /l*v msi.log $scope"
+          $before = Start-Process "$env:LOCALAPPDATA\Programs\blinkengraphs\blinkengraphs.exe" -PassThru
+          # Windows restarts only apps that have run for 60 s:
+          # https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-registerapplicationrestart
+          Start-Sleep 65
+          Msi "/i `"$new`" /qn /norestart /l*v msi.log $scope"
+          if (-not $before.HasExited) { throw 'upgrade left the old process running' }
+          $after = $null
+          foreach ($i in 1..30) {
+            $after = Get-Process blinkengraphs -ErrorAction SilentlyContinue | Where-Object Id -ne $before.Id
+            if ($after) { break }
+            Start-Sleep 1
+          }
+          if (-not $after) {
+            Select-String -Path msi.log -Pattern 'Restart Manager|RESTART|in use' | Select-Object -Last 20
+            throw 'upgrade closed the app but did not relaunch it'
+          }
+          "upgrade: closed pid $($before.Id), relaunched as pid $($after.Id)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          $after | Stop-Process
+          Msi "/x `"$new`" /qn /norestart /l*v msi.log $scope"
       - name: GUI install, screenshotting each dialog
         shell: pwsh
         run: |

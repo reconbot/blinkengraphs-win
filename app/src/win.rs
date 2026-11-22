@@ -42,6 +42,8 @@ enum UiEvent {
     StripClick,
     /// Another launch found this one running and asked it to show the Panel.
     Relaunched,
+    /// An installer's Restart Manager, or sign-out, asked the app to close.
+    EndSession,
 }
 
 const SHOW_EVENT: &str = "Local\\blinkengraphs-show\0";
@@ -140,6 +142,8 @@ impl App {
         let strip = Strip::new(move || strip_click(UiEvent::StripClick));
         let relaunch = forward(tx.clone(), ctx.clone());
         watch_relaunch(move || relaunch(UiEvent::Relaunched));
+        let end = forward(tx.clone(), ctx.clone());
+        watch_session_end(move || end(UiEvent::EndSession));
         let f = forward(tx, ctx.clone());
         GlobalHotKeyEvent::set_event_handler(Some(move |e| f(UiEvent::Hotkey(e))));
 
@@ -415,6 +419,7 @@ impl eframe::App for App {
                 UiEvent::Hotkey(_) => {}
                 UiEvent::StripClick => self.toggle(ctx, None),
                 UiEvent::Relaunched => self.show(ctx, None, None),
+                UiEvent::EndSession => self.quit(),
             }
         }
         self.redraw_icons();
@@ -615,6 +620,72 @@ fn watch_relaunch(on_show: impl Fn() + Send + 'static) {
                 return;
             }
             on_show();
+        }
+    });
+}
+
+/// An MSI upgrade's Restart Manager closes apps holding its files by sending WM_QUERYENDSESSION
+/// and WM_ENDSESSION to their top-level windows, then relaunches the ones registered for restart.
+/// winit's window ignores both, so this hidden one quits cleanly instead.
+/// https://learn.microsoft.com/windows/win32/rstmgr/guidelines-for-applications
+fn watch_session_end(on_end: impl Fn() + Send + 'static) {
+    use windows_sys::Win32::{
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        System::{LibraryLoader::GetModuleHandleW, Recovery::*},
+        UI::WindowsAndMessaging::*,
+    };
+    thread_local! {
+        static ON_END: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    }
+    unsafe extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_QUERYENDSESSION => 1,
+            WM_ENDSESSION if wp != 0 => {
+                ON_END.with(|f| f.borrow().as_ref().map(|f| f()));
+                // The UI thread saves and exits the process; returning first would let Windows
+                // treat the app as closed while it is still writing.
+                std::thread::sleep(Duration::from_secs(10));
+                0
+            }
+            _ => unsafe { DefWindowProcW(h, msg, wp, lp) },
+        }
+    }
+    // No restart after a reboot or crash: the Run value starts the app at sign-in.
+    unsafe {
+        RegisterApplicationRestart(
+            std::ptr::null(),
+            RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT,
+        )
+    };
+    std::thread::spawn(move || unsafe {
+        ON_END.with(|f| *f.borrow_mut() = Some(Box::new(on_end)));
+        let hinst = GetModuleHandleW(std::ptr::null());
+        let class: Vec<u16> = "blinkengraphs-session\0".encode_utf16().collect();
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(proc_),
+            hInstance: hinst,
+            lpszClassName: class.as_ptr(),
+            ..std::mem::zeroed()
+        };
+        RegisterClassW(&wc);
+        // Top-level (not message-only): Restart Manager only messages top-level windows.
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            class.as_ptr(),
+            class.as_ptr(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hinst,
+            std::ptr::null(),
+        );
+        let mut msg = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            DispatchMessageW(&msg);
         }
     });
 }

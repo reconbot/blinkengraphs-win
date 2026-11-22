@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Usage: installer/build.sh <x64|arm64> <path to blinkengraphs.exe> <out dir>
+# Usage: installer/build.sh <x64|arm64> <path to blinkengraphs.exe> <out dir> [version]
 set -euo pipefail
 arch=$1 exe=$2 out=$3
 here=$(cd "$(dirname "$0")" && pwd)
-version=$(cargo pkgid -p blinkengraphs | sed 's/.*[#@]//')
+version=${4:-$(cargo pkgid -p blinkengraphs | sed 's/.*[#@]//')}
 command -v wix >/dev/null || dotnet tool install --global wix --version 7.0.1
 export PATH="$PATH:$HOME/.dotnet/tools"
 # WiX v7 refuses every command until its EULA is accepted; see https://docs.firegiant.com/wix/osmf/
