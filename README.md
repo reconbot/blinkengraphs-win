@@ -6,14 +6,35 @@ Live CPU, memory, disk, network and latency graphs in the Windows 11 taskbar, in
 
 ## Install
 
-Run `blinkengraphs-x64.msi` (or `-arm64`) from a release and choose **Just me** (no admin, installs to `%LocalAppData%\Programs`) or **Everyone** (Program Files). Both start blinkengraphs at sign-in. Uninstalling keeps your settings and history.
+Download `blinkengraphs-x64.msi` or `blinkengraphs-arm64.msi` from the [latest release](https://github.com/reconbot/blinkengraphs-win/releases/latest). Run it and choose:
 
-For scripted or Intune deployment:
+- **Just me** (default): no admin, installs to `%LocalAppData%\Programs\blinkengraphs`.
+- **Everyone**: needs admin, installs to Program Files.
 
-| Scope | Command | Intune Win32 app context |
+Both add a Start-menu shortcut and start blinkengraphs at sign-in. Running a newer MSI upgrades in place. Uninstall from Settings > Apps; your settings and history in `%APPDATA%\blinkengraphs` stay.
+
+## Deploy
+
+| Scope | Install | Uninstall |
 |---|---|---|
-| Per-user | `msiexec /i blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` | User |
-| Per-machine | `msiexec /i blinkengraphs-x64.msi /qn ALLUSERS=1` | System |
+| Per-user | `msiexec /i blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` | `msiexec /x blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` |
+| Per-machine (admin) | `msiexec /i blinkengraphs-x64.msi /qn ALLUSERS=1` | `msiexec /x blinkengraphs-x64.msi /qn ALLUSERS=1` |
+
+Add `/l*v install.log` to any command for a verbose log. An upgrade only replaces an install of the same scope, so pick one scope per fleet.
+
+**Intune** ([Win32 app docs](https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-win32-add)):
+
+1. Package the MSI with the [Win32 Content Prep Tool](https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-win32-prepare): `IntuneWinAppUtil -c <folder with the msi> -s blinkengraphs-x64.msi -o <out>`.
+2. Add a Windows app (Win32) and use the commands above. Set **Install behavior** to **User** for per-user or **System** for per-machine.
+3. Under **Requirements**, set **Operating system architecture** to match the MSI, x64 or ARM64.
+4. Under **Detection rules**, use the **MSI** rule with the package's product code. Each release has a new product code; read it with:
+   ```powershell
+   $db = (New-Object -ComObject WindowsInstaller.Installer).OpenDatabase("$PWD\blinkengraphs-x64.msi", 0)
+   $v = $db.OpenView("SELECT Value FROM Property WHERE Property='ProductCode'"); $v.Execute(); $v.Fetch().StringData(1)
+   ```
+5. For a new release, add it as a new app that supersedes the old one with **Uninstall previous version** off; the MSI upgrades in place.
+
+Builds are not Authenticode-signed yet, so SmartScreen warns on download. Verify a file's build provenance with `gh attestation verify blinkengraphs-x64.msi -R reconbot/blinkengraphs-win`.
 
 ## What it shows
 
@@ -66,9 +87,9 @@ Tray Icons (actual size, then 4× zoom):
   - Themes, and a color per Probe
   - Per displayed Probe: time window and aggregate (p99, p95, p50, avg, max)
   - Graph aggregate for all graphs (same choices)
-- [ ] **M3: Distribution.**
-  - One MSI for per-user (no admin) or per-machine installs, interactive or `msiexec` switches, deployable through Intune; per-machine installs add the M4 service ([ADR 0010](docs/adr/0010-single-dual-mode-msi.md))
-  - Autostart
+- [x] **M3: Distribution.**
+  - One MSI for per-user (no admin) or per-machine installs, interactive or `msiexec` switches, deployable through Intune ([ADR 0010](docs/adr/0010-single-dual-mode-msi.md)); per-machine installs will add the M4 service
+  - Autostart at sign-in
 - [ ] **Later: code signing** with Azure Artifact Signing ([ADR 0009](docs/adr/0009-azure-artifact-signing.md), deferred)
 - [ ] **M4: Elevated Extras.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md))
 
