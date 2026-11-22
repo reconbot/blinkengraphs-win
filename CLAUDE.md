@@ -2,7 +2,7 @@
 
 Project memory lives in the repo: decisions `docs/adr/`, plan `docs/PLAN.md`, research `docs/research/`. Record learnings there.
 
-The spec repo, reconbot/blinkengraphs, authors the vocabulary, rules, vectors, fixtures, tokens, defaults and icon; this repo implements it. It is checked out at `spec/` as a submodule on a release tag. A rule this app needs starts as a spec PR. `cargo test -p conformance` runs every spec vector against this code; bump the submodule in a PR when the spec releases (spec `docs/sync.md`).
+The spec repo, reconbot/blinkengraphs, authors the vocabulary, rules, vectors, fixtures, tokens, defaults and icon; this repo implements it. It is checked out at `spec/` as a submodule on a release tag. A rule this app needs starts as a spec PR, unless it is a departure for this app's normal use ([spec ADR 0002](https://github.com/reconbot/blinkengraphs/blob/main/docs/adr/0002-platforms-may-depart-for-their-normal-use.md)): then it is an ADR here naming the rule it replaces, and the conformance tests skip any vector it voids, by name. `cargo test -p conformance` runs every spec vector against this code; bump the submodule in a PR when the spec releases (spec `docs/sync.md`).
 
 Defaults: `config::defaults` embeds `spec/defaults.json` and merges `defaults.override.json` over it (spec `rules/defaults.md`). Override a default there, with the reason in an ADR.
 
