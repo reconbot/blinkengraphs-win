@@ -4,7 +4,7 @@ pub mod theme;
 use config::{Config, SectionConfig};
 use egui::{Align, Color32, Layout, RichText, Ui, vec2};
 use egui_plot::{Line, Plot, PlotPoints};
-use history::{History, Key, Point};
+use history::{GraphPoint as Point, History, Key, State};
 use model::{Metric, Ping, Probe, ProcessRow, Readout, Section, Unit};
 use theme::{accent, card, severity_color};
 use verdict::{Finding, Severity, bytes};
@@ -44,7 +44,7 @@ pub enum Range {
     Hour,
     Day,
     Week,
-    /// From the oldest stored minute to now.
+    /// From the oldest daily Row to now.
     All,
 }
 
@@ -66,6 +66,17 @@ impl Range {
             Range::Day => 86_400,
             Range::Week => 604_800,
             Range::All => h.oldest().map_or(60, |t| now.saturating_sub(t).max(60)),
+        }
+    }
+
+    fn history(self) -> history::Range {
+        match self {
+            Range::Min1 => history::Range::Min1,
+            Range::Min15 => history::Range::Min15,
+            Range::Hour => history::Range::Hour,
+            Range::Day => history::Range::Day,
+            Range::Week => history::Range::Week,
+            Range::All => history::Range::All,
         }
     }
 
@@ -407,14 +418,8 @@ impl Panel {
     }
 
     fn points(&self, view: &View, key: &Key) -> Vec<Point> {
-        let secs = self.range.secs(view.history, view.now);
-        view.history.series(
-            key,
-            view.now.saturating_sub(secs),
-            view.now,
-            history::bucket_width(secs),
-            self.graph_aggregate,
-        )
+        view.history
+            .series(key, self.range.history(), view.now, self.graph_aggregate)
     }
 }
 
@@ -731,8 +736,8 @@ fn aggregate_tag(pu: &mut egui_plot::PlotUi, w: Window) {
     );
 }
 
-/// One line per run of adjacent buckets with values: a missing bucket or one with only losses
-/// breaks the line rather than joining across it (spec `rules/history.md`, Drawing).
+/// One line per run of adjacent buckets with values: a missing, lost or Paused bucket breaks
+/// the line rather than joining across it (spec `rules/history.md`, Drawing).
 fn to_lines(
     name: &str,
     color: Color32,
@@ -743,14 +748,12 @@ fn to_lines(
     let mut runs: Vec<Vec<[f64; 2]>> = Vec::new();
     let mut prev: Option<&Point> = None;
     for p in pts {
-        let joins = prev.is_some_and(|q| q.value.is_finite() && p.at <= q.at + q.secs);
-        if p.value.is_finite() {
+        let joins = prev.is_some_and(|q| q.value.is_some() && p.at <= q.at + q.w);
+        if let Some(v) = p.value {
             if !joins {
                 runs.push(Vec::new());
             }
-            runs.last_mut()
-                .unwrap()
-                .push([p.at as f64 - w.now, p.value as f64]);
+            runs.last_mut().unwrap().push([p.at as f64 - w.now, v]);
         }
         prev = Some(p);
     }
@@ -761,7 +764,7 @@ fn to_lines(
                 let width = pts
                     .iter()
                     .find(|p| p.at as f64 - w.now == x)
-                    .map_or(1.0, |p| p.secs as f64);
+                    .map_or(1.0, |p| p.w as f64);
                 xy.push([x + width, y]);
             }
             let line = Line::new(name.to_string(), PlotPoints::from(xy))
@@ -774,6 +777,44 @@ fn to_lines(
             }
         })
         .collect()
+}
+
+/// Shades Paused buckets as "not measuring", and rings the provisional edge, which can still
+/// change (spec `rules/history.md`, Drawing).
+fn states<'a>(pu: &mut egui_plot::PlotUi, w: Window, series: impl Iterator<Item = &'a [Point]>) {
+    let t = theme::text();
+    let mut provisional: Vec<[f64; 2]> = Vec::new();
+    let mut paused: Vec<(f64, f64)> = Vec::new();
+    for pts in series {
+        for p in pts {
+            let x = p.at as f64 - w.now;
+            if p.state == State::Paused {
+                match paused.last_mut() {
+                    Some((_, end)) if *end >= x => *end = x + p.w as f64,
+                    _ => paused.push((x, x + p.w as f64)),
+                }
+            } else if p.provisional
+                && let Some(v) = p.value
+            {
+                provisional.push([x, v]);
+            }
+        }
+    }
+    for (from, to) in paused {
+        pu.span(
+            egui_plot::Span::new("not measuring", from..=to)
+                .fill(Color32::from_rgba_unmultiplied(t.r(), t.g(), t.b(), 18))
+                .border_width(0.0),
+        );
+    }
+    if !provisional.is_empty() {
+        pu.points(
+            egui_plot::Points::new("provisional", provisional)
+                .color(theme::text_weak())
+                .filled(false)
+                .radius(2.5),
+        );
+    }
 }
 
 fn sparkplot(
@@ -793,6 +834,7 @@ fn sparkplot(
     }
     plot.show(ui, |pu| {
         unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
+        states(pu, w, series.iter().map(|s| s.2.as_slice()));
         aggregate_tag(pu, w);
         for (name, color, pts) in &series {
             for l in to_lines(name, *color, pts, true, w) {
@@ -814,6 +856,7 @@ fn multiplot(
         .y_axis_formatter(|m, _| format!("{:.0} ms", m.value))
         .show(ui, |pu| {
             unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
+            states(pu, w, series.iter().map(|s| s.2.as_slice()));
             aggregate_tag(pu, w);
             for (name, color, pts) in series {
                 for l in to_lines(name, *color, pts, false, w) {
@@ -821,7 +864,7 @@ fn multiplot(
                 }
                 let lost: Vec<[f64; 2]> = pts
                     .iter()
-                    .filter(|p| p.loss > 0.0)
+                    .filter(|p| p.loss.is_some_and(|l| l > 0.0))
                     .map(|p| [p.at as f64 - w.now, 0.0])
                     .collect();
                 if !lost.is_empty() {

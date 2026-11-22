@@ -1,5 +1,7 @@
 # History follows the spec's history rules
 
+Superseded in part by [ADR 0018](0018-history-is-raw-plus-archives.md): the Minute, seam and RAM parts no longer hold.
+
 Spec 2.0.0 adds `rules/history.md` and one percentile rank, so Windows and iOS collect, keep and draw data the same way. Windows changes:
 
 - **Rounds keep a fixed beat.** `probe::next_round` puts each round on the grid `start + k × interval`. Before, the grid restarted after any late round.

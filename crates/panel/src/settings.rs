@@ -78,9 +78,9 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View, export: &mut bool) ->
 
     group(ui, "History", |ui| {
         ui.horizontal(|ui| {
-            ui.label("Keep history for");
+            ui.label("Keep the All range for");
             ui.add(
-                egui::DragValue::new(&mut config.history.rollup_days)
+                egui::DragValue::new(&mut config.history.archive_days)
                     .range(1..=config::HistoryConfig::MAX_DAYS)
                     .suffix(" days"),
             );
@@ -93,9 +93,14 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View, export: &mut bool) ->
                 .map(|g| g.latency_probes().len() + g.dns_probes().len())
                 .sum::<usize>();
         let measured = view.history.storage();
-        let estimate = history::estimate_bytes(series, config.history.rollup_days, measured);
+        let estimate = history::estimate_bytes(
+            series,
+            &config.history_limits(),
+            config.history.archive_days,
+            measured,
+        );
         let mut text = format!(
-            "About {} on disk for {series} series at one row per minute.",
+            "About {} on disk for {series} series: 24 hours at 5 minutes, 7 days hourly, then daily.",
             verdict::bytes(estimate as f64)
         );
         if let Some(s) = measured {
@@ -106,7 +111,7 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View, export: &mut bool) ->
             if ui
                 .button("Export all to CSV")
                 .on_hover_text(
-                    "Every stored minute of every series, written to your Downloads folder",
+                    "Every stored 5-minute, hourly and daily row of every series, written to your Downloads folder",
                 )
                 .clicked()
             {

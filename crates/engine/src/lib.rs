@@ -254,7 +254,7 @@ impl<S: Sensors> Monitor<S> {
                     .lock()
                     .unwrap()
                     .history
-                    .set_rollup_days(c.history.rollup_days);
+                    .set_archive_days(c.history.archive_days);
                 self.config = *c;
             }
             Command::PanelOpen(open) => self.panel_open = open,
