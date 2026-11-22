@@ -91,3 +91,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || needs.release-please.outputs.tag }}
         run: gh release upload "$TAG" dist/*.exe --clobber
+
+  screenshots:
+    needs: [release-please, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && (needs.release-please.outputs.created == 'true' || inputs.tag) }}
+    uses: ./.github/workflows/release-screenshots.yml
+    with:
+      tag: ${{ inputs.tag || needs.release-please.outputs.tag }}

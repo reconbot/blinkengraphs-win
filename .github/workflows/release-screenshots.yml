@@ -1,7 +1,12 @@
 name: release-screenshots
+# release.yml calls this after publishing: a release created with GITHUB_TOKEN fires no
+# `release` event (https://docs.github.com/en/actions/using-workflows/triggering-a-workflow#triggering-a-workflow-from-a-workflow).
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -9,7 +14,7 @@ on:
         required: true
 
 concurrency:
-  group: release-screenshots-${{ inputs.tag || github.event.release.tag_name }}
+  group: release-screenshots-${{ inputs.tag }}
   cancel-in-progress: true
 
 permissions:
@@ -23,12 +28,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           sha=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
           raw="https://raw.githubusercontent.com/$GH_REPO/ci-screenshots/$sha"
           body=$(gh release view "$TAG" --json body --jq .body)
           if grep -q '<!-- screenshots -->' <<<"$body"; then exit 0; fi
+          # The screenshots workflow renders the same commit in parallel; give it 15 minutes.
+          for _ in $(seq 90); do
+            gh api "repos/$GH_REPO/contents/$sha/tray-icons.png?ref=ci-screenshots" --silent 2>/dev/null && break
+            sleep 10
+          done
+          gh api "repos/$GH_REPO/contents/$sha/tray-icons.png?ref=ci-screenshots" --silent
           cat > notes.md <<NOTES
           $body
 
