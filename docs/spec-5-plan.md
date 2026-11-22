@@ -64,7 +64,7 @@ The pure functions take slices, so the conformance runner never touches SQLite. 
 Each one merges when CI is green. The `spec/` bump has to land with runners for every v5 vector, so the first PR carries the pure cores.
 
 1. **Spec 5.0.0, pure cores.** Bump `spec/` and update `HistoryDefaults` (`raw_minutes`, `archives`; today's struct panics on v5). Add `raw`, `archive`, `range`, `stats` and `cut` as pure functions, with runners for every new vector. Drop the `minutes` and `buckets` runners. Add the Verdict `Paused` rule, `since_pause_s` and the 4.0.0 tie rule. The app keeps running on the old storage path.
-2. **History on Raw and Archives.** Add the SQLite shell for Raw and Archives, the facade, the migration from the `minute` table, and the Panel states. Remove `ram`, `recent`, `Minute` storage and the seam. Supersede the Minute and seam parts of ADR 0017.
+2. **History on Raw and Archives.** Add the SQLite shell for Raw and Archives, the facade, and the Panel states. Drop the `minute`, `recent` and v1 `rollup` tables: History starts empty, which the release notes say. Remove `ram`, `Minute` storage and the seam. Supersede the Minute and seam parts of ADR 0017.
 3. **Pauses.** Add suspend and resume, idle rest as a Pause, `Event::Round` and cut Rounds, the kill Pause on launch, the resuming Verdict, and the meters by time. Write ADRs for the settle time, the Raw write cadence and the idle-rest default.
 4. **Links.** Enumerate Links, send per interface, key per Link, add the Panel picker and markers. Write an ADR for the Link identity.
 
@@ -78,11 +78,9 @@ Each runs on a real Windows machine and has no CI substitute:
 
 ## Open questions
 
-Need the owner:
-- **Existing history:** convert the `minute` table into A1, A2 and A3 (exact: Minutes merge into Rows), or start empty?
-- **Slicing:** four PRs as above, or one?
+Decided by the owner: history starts empty, and the work lands as the four PRs above.
 
-Need a spec PR first:
-- **Link identity:** "interface and Gateway" leaves a dual-stack Link (a v4 and a v6 Gateway) and a VPN with no Gateway (on-link default route, as on Wintun) undefined.
+Raised in spec reconbot/blinkengraphs#46:
+- **Link identity:** it proposes the IPv4 Gateway, else the IPv6 one, else the interface alone. PR 4 follows whatever merges.
 - **Followed Adapter versus default route:** with a pinned adapter, the Network Section and the Verdict speak for different Links. Is that intended?
-- **`graph-raw.json` case 2:** its name says a bucket 8 s Paused draws its data. The bucket is 15 s, 8 > 7.5, and `expected` is `paused`, which follows the rule. The name is wrong, and no Raw vector covers a bucket Paused for half or less of its width that still draws.
+- **`graph-raw.json` case 2:** it is misnamed, and the PR adds the "half or less still draws" case it meant to cover.
