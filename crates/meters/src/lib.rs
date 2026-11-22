@@ -31,27 +31,37 @@ fn series(
     now: u64,
 ) -> Series {
     if section == Section::Latency {
-        let raw = h.recent(&Key::Probe(config.primary.clone()), n);
+        // One column a second, so a Pause shows as empty columns rather than old and new results
+        // side by side. The newest seconds' Rounds may still be waiting for replies, so the
+        // Meter ends where every Round has reported: a timeout plus a second.
+        let end = now.saturating_sub(h.grace_s());
+        let raw = h.by_second(&Key::Probe(config.primary.clone()), end, n);
         let latency = shown.contains(&Readout::Ping(Ping::Latency));
         let loss = shown.contains(&Readout::Ping(Ping::Loss));
         if !latency {
-            return Series::Loss(raw.iter().map(|r| loss && r.is_none()).collect());
+            return Series::Loss(raw.iter().map(|r| loss && *r == Some(None)).collect());
         }
         let scale = latency_scale(h.now(&config.primary, now).and_then(|s| s.baseline_ms));
         return Series::Latency(
             raw.into_iter()
                 .map(|r| match r {
-                    Some(ms) => Some((ms / scale).min(1.0)),
-                    None if loss => None,
-                    None => Some(0.0),
+                    Some(Some(ms)) => Some((ms / scale).min(1.0)),
+                    Some(None) if loss => None,
+                    _ => Some(0.0),
                 })
                 .collect(),
         );
     }
+    let seconds = |m: Metric| -> Vec<Option<f32>> {
+        h.by_second(&Key::Metric(m), now, n)
+            .into_iter()
+            .map(Option::flatten)
+            .collect()
+    };
     let metrics = SectionConfig::metrics(shown);
     if metrics.contains(&Metric::NetDown) && metrics.contains(&Metric::NetUp) {
-        let down = h.recent(&Key::Metric(Metric::NetDown), n);
-        let up = h.recent(&Key::Metric(Metric::NetUp), n);
+        let down = seconds(Metric::NetDown);
+        let up = seconds(Metric::NetUp);
         let max = down
             .iter()
             .chain(&up)
@@ -65,12 +75,11 @@ fn series(
         return Series::Duplex(norm(down), norm(up));
     }
     match metrics.first() {
-        Some(&m) => Series::Level(normalize(m, &h.recent(&Key::Metric(m), n))),
+        Some(&m) => Series::Level(normalize(m, &seconds(m))),
         None => Series::Level(vec![]),
     }
 }
 
-/// Full height of the Latency Meter: four times the baseline, at least 100 ms.
 pub fn latency_scale(baseline_ms: Option<f32>) -> f32 {
     (baseline_ms.unwrap_or(20.0) * 4.0).max(100.0)
 }

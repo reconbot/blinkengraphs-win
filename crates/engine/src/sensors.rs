@@ -37,6 +37,8 @@ pub trait Sensors: Send {
     fn adapters(&mut self) -> Vec<String>;
     fn set_adapter(&mut self, a: AdapterChoice);
     fn network(&mut self) -> Network;
+    /// Seconds asleep since boot; a jump is a suspend that sent no notice.
+    fn slept_s(&mut self) -> f64;
 }
 
 /// The OS adapter: performance counters through `collect`, network state through `probe`.
@@ -104,6 +106,10 @@ impl Sensors for SystemSensors {
             c.set_adapter(a.clone());
         }
         self.adapter = a;
+    }
+
+    fn slept_s(&mut self) -> f64 {
+        collect::slept_s()
     }
 
     fn network(&mut self) -> Network {

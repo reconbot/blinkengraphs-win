@@ -389,6 +389,7 @@ impl Config {
             hop_window: d.hop_trace.hop_window,
             recent_window_s: d.history.recent_window_s,
             grace_s: history::archive::grace_s(d.max_timeout_ms),
+            settle_s: d.history.settle_s,
         }
     }
 }

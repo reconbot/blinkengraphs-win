@@ -91,6 +91,8 @@ pub struct HistoryDefaults {
     pub recent_window_s: u64,
     /// A1, A2, A3 in order (spec `rules/history.md`, Archives).
     pub archives: Vec<ArchiveDefaults>,
+    /// How long a Pause outlasts the resume. Windows' own, from `defaults.override.json` (ADR 0019).
+    pub settle_s: f64,
 }
 
 #[derive(Debug, Deserialize)]

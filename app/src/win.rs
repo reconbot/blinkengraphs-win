@@ -218,6 +218,7 @@ impl App {
             move || wake_ctx.request_repaint(),
             Box::new(idle),
         );
+        watch_power(engine.commands());
 
         let px = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) }.max(16) as u32;
         let mut menu = Vec::new();
@@ -628,6 +629,48 @@ fn watch_display() {
             windows_sys::Win32::UI::WindowsAndMessaging::DEVICE_NOTIFY_CALLBACK,
             (params as *mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS).cast(),
             &mut handle,
+        );
+    }
+}
+
+static POWER: std::sync::OnceLock<std::sync::mpsc::Sender<engine::Command>> =
+    std::sync::OnceLock::new();
+
+/// Suspend begins a Pause and resume ends it (spec `rules/history.md`, Pauses). Registering
+/// also opts the app into Modern Standby's suspend notice; PBT_APMRESUMEAUTOMATIC is sent on
+/// every resume, PBT_APMRESUMESUSPEND only when a user woke the machine (research 07 §1).
+/// https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-registersuspendresumenotification
+fn watch_power(commands: std::sync::mpsc::Sender<engine::Command>) {
+    use windows_sys::Win32::{System::Power::*, UI::WindowsAndMessaging::*};
+    unsafe extern "system" fn on_power(
+        _: *const core::ffi::c_void,
+        kind: u32,
+        _: *const core::ffi::c_void,
+    ) -> u32 {
+        // Windows allows about 2 s after PBT_APMSUSPEND; a channel send returns at once and
+        // the engine writes Raw on its own thread.
+        let c = match kind {
+            PBT_APMSUSPEND => engine::Command::Suspend(model::now_f64()),
+            PBT_APMRESUMEAUTOMATIC => engine::Command::Resume(model::now_f64()),
+            _ => return 0,
+        };
+        if let Some(tx) = POWER.get() {
+            let _ = tx.send(c);
+        }
+        0
+    }
+    if POWER.set(commands).is_err() {
+        return;
+    }
+    // Leaked: Windows may read the parameters for the life of the registration.
+    let params = Box::leak(Box::new(DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS {
+        Callback: Some(on_power),
+        Context: std::ptr::null_mut(),
+    }));
+    unsafe {
+        RegisterSuspendResumeNotification(
+            (params as *mut DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS).cast(),
+            DEVICE_NOTIFY_CALLBACK,
         );
     }
 }

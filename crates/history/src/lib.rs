@@ -71,7 +71,7 @@ pub struct Summary {
 
 /// How much History keeps and what "now" means. Callers fill it from the merged defaults
 /// (spec `defaults.json` `history` and `hop_trace`), plus the user's retention choice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
     /// How far back Raw keeps results.
     pub raw_s: u64,
@@ -83,6 +83,9 @@ pub struct Limits {
     pub recent_window_s: u64,
     /// How long after its `at` a result can still arrive (`archive::grace_s`).
     pub grace_s: u64,
+    /// How long after measuring resumes a Pause still lasts, while the network comes back
+    /// (spec `rules/history.md`, Pauses; ADR 0019).
+    pub settle_s: f64,
 }
 
 #[derive(Default)]
@@ -145,8 +148,15 @@ pub fn estimate_bytes(series: usize, limits: &Limits, days: u32, measured: Optio
 impl History {
     /// `db: None` keeps everything in memory (tests, or a disk that refuses writes).
     pub fn open(db: Option<&Path>, limits: Limits) -> Self {
+        Self::open_at(db, limits, model::now_f64())
+    }
+
+    /// Opens History at `launch`. The time since measuring last stopped is a Pause that ends
+    /// the settle time after `launch`: the one a shutdown or suspend began, or after a kill,
+    /// one from the second after the newest result on disk.
+    pub fn open_at(db: Option<&Path>, limits: Limits, launch: f64) -> Self {
         let store = Store::open(db);
-        let now = model::now();
+        let now = launch as u64;
         let cursors = [0, 1, 2].map(|i| store.cursor(i));
         // Raw for steps not yet written is reloaded too, so a restart writes them.
         let since = now.saturating_sub(limits.raw_s);
@@ -167,13 +177,70 @@ impl History {
             storage: None,
             store,
         };
+        let mut newest = None;
         for (id, at, v) in h.store.load_raw(since) {
             if let Some(key) = Key::from_id(&id) {
+                newest = newest.max(Some(at));
                 h.push(key, at, v);
+            }
+        }
+        let end = launch + h.limits.settle_s;
+        if let Some(open) = h.pauses.iter_mut().find(|p| p.end.is_infinite()) {
+            open.end = end;
+            h.unwritten_pauses.push(*open);
+        } else if let Some(at) = newest {
+            let p = Pause::after_kill(at, launch, h.limits.settle_s);
+            if p.begin < p.end {
+                h.pauses.push(p);
+                h.unwritten_pauses.push(p);
             }
         }
         h.storage = h.measure();
         h
+    }
+
+    /// Measuring stops at `at`; Raw reaches disk now, so a kill during the Pause loses nothing.
+    pub fn begin_pause(&mut self, at: f64) {
+        if self.pauses.iter().any(|p| p.end.is_infinite()) {
+            return;
+        }
+        let p = Pause {
+            begin: at,
+            end: f64::INFINITY,
+        };
+        self.pauses.push(p);
+        self.unwritten_pauses.push(p);
+        self.write_raw();
+    }
+
+    /// The open Pause ends at `end`: the settle time after measuring resumed.
+    pub fn end_pause(&mut self, end: f64) {
+        if let Some(p) = self.pauses.iter_mut().find(|p| p.end.is_infinite()) {
+            p.end = end.max(p.begin);
+            self.unwritten_pauses.push(*p);
+        }
+    }
+
+    /// Whether a Round from `start` to the end of its last Probe falls in a Pause, so it
+    /// records nothing.
+    pub fn cut(&self, start: f64, end: f64) -> bool {
+        pause::cut(start, end, &self.pauses)
+    }
+
+    /// Seconds since the last Pause ended, 0 while one lasts; `None` with no Pause kept.
+    pub fn since_pause_s(&self, now: f64) -> Option<u64> {
+        let last = self
+            .pauses
+            .iter()
+            .max_by(|a, b| a.begin.total_cmp(&b.begin))?;
+        Some((now - last.end).max(0.0) as u64)
+    }
+
+    /// The Pauses Raw still spans, oldest first.
+    pub fn pauses(&self) -> Vec<Pause> {
+        let mut p = self.pauses.clone();
+        p.sort_by(|a, b| a.begin.total_cmp(&b.begin));
+        p
     }
 
     pub fn record_sample(&mut self, s: &Sample) {
@@ -236,6 +303,23 @@ impl History {
             .unwrap_or_default()
     }
 
+    /// The last `n` seconds up to `now`, oldest first, one slot a second: `None` when nothing
+    /// was recorded that second (not measuring, or between Rounds), else the newest result,
+    /// whose `None` is a loss. A Meter drawn from it shows a Pause as a Pause.
+    pub fn by_second(&self, key: &Key, now: u64, n: usize) -> Vec<Option<Option<f32>>> {
+        let mut out = vec![None; n];
+        let first = (now + 1).saturating_sub(n as u64);
+        if let Some(q) = self.raw.get(key) {
+            for (at, v) in q.iter().rev().take_while(|(at, _)| *at >= first) {
+                let i = (at - first) as usize;
+                if i < n && out[i].is_none() {
+                    out[i] = Some(*v);
+                }
+            }
+        }
+        out
+    }
+
     /// The Probe's stats over the recent window (`Limits::recent_window_s`) back from `now`;
     /// `None` while that window is empty.
     pub fn now(&self, probe: &Probe, now: u64) -> Option<ProbeStat> {
@@ -275,6 +359,11 @@ impl History {
                 1.0 - window.iter().flatten().count() as f32 / window.len() as f32
             },
         }
+    }
+
+    /// How long after its `at` a result can still arrive.
+    pub fn grace_s(&self) -> u64 {
+        self.limits.grace_s
     }
 
     /// The Probe stats window, `Limits::recent_window_s`.
@@ -714,6 +803,7 @@ mod tests {
             hop_window: 60,
             recent_window_s: 30,
             grace_s: 2,
+            settle_s: 2.0,
         }
     }
 
@@ -850,7 +940,11 @@ mod tests {
         assert!(kept + RAW_WRITE_S >= 900, "{kept}");
         let day = h.series(&key(), Range::Day, t0 + 900, Aggregate::Max);
         assert_eq!(day.iter().filter(|p| !p.provisional).count(), 2);
-        assert!(day.iter().all(|p| p.value == Some(12.0)));
+        // The kill left a Pause from the newest result on, so later buckets are Paused.
+        assert!(
+            day.iter()
+                .all(|p| p.value == Some(12.0) || p.state == State::Paused)
+        );
     }
 
     #[test]
@@ -908,6 +1002,104 @@ mod tests {
             rows: 20_000,
         };
         assert_eq!(estimate_bytes(10, &limits(), 1, Some(big)), 457 * 10 * 100);
+    }
+
+    #[test]
+    fn a_round_that_a_pause_cuts_records_nothing() {
+        let mut h = History::open(None, limits());
+        feed(&mut h, 100, 110, |_| Some(5.0));
+        h.begin_pause(110.5);
+        assert!(h.cut(110.2, 110.9));
+        assert!(!h.cut(109.2, 110.4));
+        h.end_pause(200.0);
+        assert!(h.cut(199.5, 200.5), "a Round started in the settle time");
+        assert!(!h.cut(200.0, 200.6));
+    }
+
+    #[test]
+    fn since_pause_counts_from_the_end_of_the_settle_time() {
+        let mut h = History::open(None, limits());
+        assert_eq!(h.since_pause_s(100.0), None);
+        h.begin_pause(100.0);
+        assert_eq!(h.since_pause_s(150.0), Some(0));
+        h.end_pause(160.0);
+        assert_eq!(h.since_pause_s(159.0), Some(0));
+        assert_eq!(h.since_pause_s(170.5), Some(10));
+    }
+
+    #[test]
+    fn a_kill_leaves_a_pause_from_the_newest_result_to_launch_plus_settle() {
+        let db = TempDb::new("kill-pause");
+        let t0 = recent_start();
+        {
+            let mut h = History::open(Some(&db.0), limits());
+            feed(&mut h, t0, t0 + 20, |_| Some(5.0));
+            // Dropped without close: only what reached disk survives.
+        }
+        let launch = (t0 + 400) as f64 + 0.5;
+        let h = History::open_at(Some(&db.0), limits(), launch);
+        let p = h.pauses();
+        assert_eq!(p.len(), 1);
+        // The second after the newest result on disk, which is at most RAW_WRITE_S old.
+        let begin = p[0].begin as u64;
+        assert!((t0 + 20 - RAW_WRITE_S..=t0 + 20).contains(&begin), "{p:?}");
+        assert_eq!(p[0].end, launch + 2.0);
+    }
+
+    #[test]
+    fn a_shutdown_pause_ends_at_the_next_launch_plus_settle() {
+        let db = TempDb::new("shutdown-pause");
+        let t0 = recent_start();
+        {
+            let mut h = History::open(Some(&db.0), limits());
+            feed(&mut h, t0, t0 + 20, |_| Some(5.0));
+            h.begin_pause((t0 + 20) as f64 + 0.25);
+            h.close(t0 + 20);
+        }
+        let launch = (t0 + 600) as f64;
+        let h = History::open_at(Some(&db.0), limits(), launch);
+        assert_eq!(
+            h.pauses(),
+            vec![Pause {
+                begin: (t0 + 20) as f64 + 0.25,
+                end: launch + 2.0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_long_pause_draws_as_paused() {
+        let mut h = History::open(None, limits());
+        feed(&mut h, 0, 600, |_| Some(5.0));
+        h.begin_pause(600.0);
+        h.end_pause(2400.0);
+        feed(&mut h, 2400, 3000, |_| Some(5.0));
+        let day = h.series(&key(), Range::Day, 3000, Aggregate::Max);
+        let paused: Vec<u64> = day
+            .iter()
+            .filter(|p| p.state == State::Paused)
+            .map(|p| p.at)
+            .collect();
+        assert_eq!(paused, (600..2400).step_by(300).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn by_second_leaves_unmeasured_seconds_empty() {
+        let mut h = History::open(None, limits());
+        feed(&mut h, 100, 103, |t| (t != 101).then_some(t as f32));
+        feed(&mut h, 106, 108, |t| Some(t as f32));
+        let got = h.by_second(&key(), 107, 8);
+        let want = [
+            Some(Some(100.0)),
+            Some(None),
+            Some(Some(102.0)),
+            None,
+            None,
+            None,
+            Some(Some(106.0)),
+            Some(Some(107.0)),
+        ];
+        assert_eq!(got, want);
     }
 
     #[test]
