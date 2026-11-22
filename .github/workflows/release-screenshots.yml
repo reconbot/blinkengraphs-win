@@ -31,33 +31,37 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           sha=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
-          raw="https://raw.githubusercontent.com/$GH_REPO/ci-screenshots/$sha"
-          body=$(gh release view "$TAG" --json body --jq .body)
-          if grep -q '<!-- screenshots -->' <<<"$body"; then exit 0; fi
           # The screenshots workflow renders the same commit in parallel; give it 15 minutes.
           for _ in $(seq 90); do
             gh api "repos/$GH_REPO/contents/$sha/tray-icons.png?ref=ci-screenshots" --silent 2>/dev/null && break
             sleep 10
           done
-          gh api "repos/$GH_REPO/contents/$sha/tray-icons.png?ref=ci-screenshots" --silent
-          cat > notes.md <<NOTES
-          $body
-
-          <!-- screenshots -->
-          ## Screenshots
-
-          Rendered by CI from fixture data at \`${sha:0:7}\`.
-
-          | Panel | Network |
-          |---|---|
-          | ![Panel]($raw/panel-isp-loss-overview.png) | ![Network]($raw/panel-isp-loss-network.png) |
-
-          **Taskbar Strip**
-
-          ![Strip]($raw/strip-upload-saturation.png)
-
-          **Tray Icons** (actual size, then 4× zoom)
-
-          ![Tray Icons]($raw/tray-icons.png)
-          NOTES
+          gh api "repos/$GH_REPO/contents/$sha?ref=ci-screenshots" --jq '[.[].name | select(endswith(".png"))]' > names.json
+          gh release view "$TAG" --json body --jq .body > body.md
+          # Every screenshot of the commit, grouped by kind; a re-run replaces the section.
+          python3 - "$sha" > notes.md <<'PY'
+          import json, os, sys
+          sha = sys.argv[1]
+          raw = f"https://raw.githubusercontent.com/{os.environ['GH_REPO']}/ci-screenshots/{sha}"
+          body = open("body.md").read().split("<!-- screenshots -->")[0].rstrip()
+          names = sorted(json.load(open("names.json")))
+          caption = lambda n, prefix: n.removeprefix(prefix).removesuffix(".png").replace("-", " ")
+          out = [body, "", "<!-- screenshots -->", "## Screenshots", "",
+                 f"Rendered by CI from fixture data at `{sha[:7]}`.", ""]
+          panels = [n for n in names if n.startswith("panel-")]
+          if panels:
+              out += ["### Panel", "", "<table>"]
+              for row in range(0, len(panels), 3):
+                  out += ["<tr>"] + [f'<td align="center" valign="top"><img src="{raw}/{n}" width="260"><br><sub>{caption(n, "panel-")}</sub></td>' for n in panels[row:row + 3]] + ["</tr>"]
+              out += ["</table>", ""]
+          strips = [n for n in names if n.startswith("strip-")]
+          if strips:
+              out += ["### Taskbar Strip", ""]
+              for n in strips:
+                  out += [f"**{caption(n, 'strip-')}**", "", f"![{n}]({raw}/{n})", ""]
+          rest = [n for n in names if not n.startswith(("panel-", "strip-"))]
+          for n in rest:
+              out += [f"### {caption(n, '').capitalize()}", "", f"![{n}]({raw}/{n})", ""]
+          print("\n".join(out))
+          PY
           gh release edit "$TAG" --notes-file notes.md
