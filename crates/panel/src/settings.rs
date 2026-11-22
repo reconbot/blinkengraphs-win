@@ -378,7 +378,8 @@ fn interval(ui: &mut Ui, label: &str, ms: &mut u64) {
     });
 }
 
-const WIDTHS: [f32; 7] = [0.0, 32.0, 52.0, 52.0, 30.0, 34.0, 16.0];
+// TCP and UDP fit a checkbox and a five-digit port.
+const WIDTHS: [f32; 7] = [0.0, 32.0, 68.0, 68.0, 30.0, 34.0, 16.0];
 
 fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>, gi: usize) {
     ui.horizontal(|ui| {
@@ -396,11 +397,26 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
     ui.add_space(4.0);
     crate::table_cells(ui, &WIDTHS, false, |i, ui| {
         let h = ["Target", "ICMP", "TCP", "UDP", "DNS", "Trace", ""][i];
-        let label = ui.label(RichText::new(h).small().weak());
-        if i == 3 {
-            label.on_hover_text(
-                "A closed port works: the host answers port-unreachable. Try 33434.",
-            );
+        let text = RichText::new(h).small().weak();
+        // Over the checkbox, which starts the TCP and UDP cells.
+        let label = if matches!(i, 2 | 3) {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(text)
+            })
+            .inner
+        } else {
+            ui.label(text)
+        };
+        match i {
+            2 => {
+                label.on_hover_text("Tick to time a TCP handshake to the port.");
+            }
+            3 => {
+                label.on_hover_text(
+                    "Tick to send a UDP datagram to the port. A closed port works: the host answers port-unreachable.",
+                );
+            }
+            _ => {}
         }
     });
     let mut remove = None;
@@ -420,8 +436,8 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
                 1 => {
                     ui.add(egui::Checkbox::without_text(&mut row.icmp));
                 }
-                2 => port(ui, &mut row.tcp),
-                3 => port(ui, &mut row.udp),
+                2 => port(ui, &mut row.tcp, TCP_PORT),
+                3 => port(ui, &mut row.udp, UDP_PORT),
                 4 => {
                     ui.add(egui::Checkbox::without_text(&mut row.dns));
                 }
@@ -451,18 +467,51 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
     }
 }
 
-/// Empty means off.
-fn port(ui: &mut Ui, value: &mut Option<u16>) {
-    let mut text = value.map(|p| p.to_string()).unwrap_or_default();
-    let edit = egui::TextEdit::singleline(&mut text)
-        .hint_text("off")
-        .desired_width(f32::INFINITY)
-        .align(egui::Align2::RIGHT_CENTER);
-    if ui.add(edit).changed() {
-        match text.trim().parse::<u16>() {
-            Ok(p) if p > 0 => *value = Some(p),
-            _ if text.trim().is_empty() => *value = None,
-            _ => {}
+/// The port a Probe starts on when ticked: HTTPS, and the first port traceroute uses, which
+/// is almost always closed and so draws port-unreachable.
+const TCP_PORT: u16 = 443;
+const UDP_PORT: u16 = 33434;
+
+/// A checkbox turns the Probe on and shows its port beside it; unticking hides the port, which
+/// comes back as it was if ticked again this session. A text field with an "off" hint didn't
+/// read as an input.
+fn port(ui: &mut Ui, value: &mut Option<u16>, default: u16) {
+    let remembered = ui.make_persistent_id(("port", default));
+    let mut on = value.is_some();
+    let mut port = value.unwrap_or_else(|| ui.data(|d| d.get_temp(remembered)).unwrap_or(default));
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        // The theme's 10 pt button padding and 40 pt minimum widget width overflow the column.
+        let spacing = ui.spacing_mut();
+        spacing.item_spacing.x = 4.0;
+        spacing.button_padding = egui::vec2(3.0, 1.0);
+        spacing.interact_size.x = 0.0;
+        ui.add(egui::Checkbox::without_text(&mut on));
+        if on {
+            ui.add_sized(
+                [ui.available_width(), 18.0],
+                egui::DragValue::new(&mut port)
+                    .range(1..=u16::MAX)
+                    .speed(1.0),
+            )
+            .on_hover_text("Port. Click to type, or drag.");
         }
+    });
+    ui.data_mut(|d| d.insert_temp(remembered, port));
+    *value = probe_port(on, port);
+}
+
+fn probe_port(on: bool, port: u16) -> Option<u16> {
+    (on && port > 0).then_some(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unticked_port_measures_nothing() {
+        assert_eq!(probe_port(false, 443), None);
+        assert_eq!(probe_port(true, 443), Some(443));
+        assert_eq!(probe_port(true, 0), None);
     }
 }
