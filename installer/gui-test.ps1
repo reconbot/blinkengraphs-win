@@ -11,17 +11,20 @@ function Setup-Window {
   $A::RootElement.FindFirst($Scope::Children,
     (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'blinkengraphs Setup')))
 }
-# Win32 labels carry & mnemonics; compare without them.
-function Find($win, [string]$like) {
+$CT = [System.Windows.Automation.ControlType]
+# Win32 labels carry & mnemonics; compare without them. A label and its control can share a name, so match the type.
+function Find($win, [string]$like, $type = $CT::Button) {
   foreach ($e in $win.FindAll($Scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
-    if (($e.Current.Name -replace '&', '') -like $like) { return $e }
+    if ($e.Current.ControlType -eq $type -and ($e.Current.Name -replace '&', '') -like $like) { return $e }
   }
 }
 function Enabled($e) { $e -and $e.Current.IsEnabled }
 function Click($e) { $e.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke() }
 function Toggle-To($e, [bool]$on) {
-  $p = $e.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-  if (($p.Current.ToggleState -eq 'On') -ne $on) { $p.Toggle() }
+  $p = $null
+  if ($e.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$p)) {
+    if (($p.Current.ToggleState -eq 'On') -ne $on) { $p.Toggle() }
+  } elseif ($on) { Click $e }
 }
 function Shot($win, [string]$name) {
   $r = $win.Current.BoundingRectangle
@@ -46,21 +49,22 @@ foreach ($_ in 1..120) {
   $finish = Find $win 'Finish'
   if ($names -ne $last) {
     $n++
-    $label = if ($finish) { 'finish' } elseif (Find $win 'Install just for you*') { 'scope' }
-             elseif (Find $win 'I accept the terms*') { 'welcome' } elseif (Enabled (Find $win 'Install')) { 'ready' }
+    $label = if ($finish) { 'finish' } elseif (Find $win 'Install just for you*' $CT::RadioButton) { 'scope' }
+             elseif (Find $win 'I accept the terms*' $CT::CheckBox) { 'welcome' } elseif (Enabled (Find $win 'Install')) { 'ready' }
              else { 'progress' }
     Shot $win ('installer-{0:d2}-{1}' -f $n, $label)
     $last = $names
   }
   if ($finish) {
-    $launch = Find $win 'Launch blinkengraphs'
+    $launch = Find $win 'Launch blinkengraphs' $CT::CheckBox
     if ($launch) { Toggle-To $launch $false }
     Click $finish; break
   }
-  $eula = Find $win 'I accept the terms*'
+  $eula = Find $win 'I accept the terms*' $CT::CheckBox
   if ($eula) { Toggle-To $eula $true }
-  $justMe = Find $win 'Install just for you*'
-  if ($justMe) { $justMe.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select() }
+  $justMe = Find $win 'Install just for you*' $CT::RadioButton
+  $sel = $null
+  if ($justMe -and $justMe.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$sel)) { $sel.Select() }
   foreach ($b in 'Advanced', 'Next', 'Install') {
     $e = Find $win $b
     if (Enabled $e) { Click $e; break }
