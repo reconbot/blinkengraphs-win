@@ -352,49 +352,60 @@ fn engine_constants_match_the_merged_defaults() {
     assert_eq!(history::RECENT_SECS, d.history.recent_window_s);
 }
 
+/// The Default preset in each Appearance against the spec's tokens: the base file is dark;
+/// light replaces each color its file has (spec `tokens/README.md`).
 #[test]
-fn dark_palette_matches_the_base_tokens() {
+fn palette_matches_the_tokens() {
     use model::Section;
     use palette::{Palette, Preset, Shade};
-    let t = load("tokens/blinkengraphs.tokens.json");
-    let p = Palette::new(Preset::Default, Shade::Dark, &Default::default());
-    let hex = |c: palette::Rgb| String::from(c);
-    let tok = |path: &str| {
-        path.split('.').fold(&t["color"], |v, k| &v[k])["$value"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
-    for (s, k) in [
-        (Section::Cpu, "cpu"),
-        (Section::Memory, "memory"),
-        (Section::Network, "network"),
-        (Section::Disk, "disk"),
-        (Section::Latency, "latency"),
-    ] {
-        assert_eq!(
-            hex(p.section(s)),
-            tok(&format!("section.{k}")),
-            "section.{k}"
-        );
+    let base = load("tokens/blinkengraphs.tokens.json");
+    let light = load("tokens/blinkengraphs.light.tokens.json");
+    for shade in [Shade::Dark, Shade::Light] {
+        let p = Palette::new(Preset::Default, shade, &Default::default());
+        let tok = |path: &str| {
+            let find = |t: &Value| {
+                path.split('.').fold(&t["color"], |v, k| &v[k])["$value"]
+                    .as_str()
+                    .map(str::to_string)
+            };
+            (shade == Shade::Light)
+                .then(|| find(&light))
+                .flatten()
+                .or_else(|| find(&base))
+                .unwrap()
+        };
+        let hex = |c: palette::Rgb| String::from(c);
+        for (s, k) in [
+            (Section::Cpu, "cpu"),
+            (Section::Memory, "memory"),
+            (Section::Network, "network"),
+            (Section::Disk, "disk"),
+            (Section::Latency, "latency"),
+        ] {
+            assert_eq!(
+                hex(p.section(s)),
+                tok(&format!("section.{k}")),
+                "{shade:?} section.{k}"
+            );
+        }
+        for (c, k) in [
+            (p.upload, "section.upload"),
+            (p.loss, "loss"),
+            (p.ok, "severity.ok"),
+            (p.warn, "severity.warn"),
+            (p.crit, "severity.crit"),
+            (p.bg, "surface.background"),
+            (p.card, "surface.card"),
+            (p.card_edge, "surface.card-edge"),
+            (p.text, "surface.text"),
+            (p.text_weak, "surface.text-weak"),
+        ] {
+            assert_eq!(hex(c), tok(k), "{shade:?} {k}");
+        }
     }
-    for (c, k) in [
-        (p.upload, "section.upload"),
-        (p.loss, "loss"),
-        (p.ok, "severity.ok"),
-        (p.warn, "severity.warn"),
-        (p.crit, "severity.crit"),
-        (p.bg, "surface.background"),
-        (p.card, "surface.card"),
-        (p.card_edge, "surface.card-edge"),
-        (p.text, "surface.text"),
-        (p.text_weak, "surface.text-weak"),
-    ] {
-        assert_eq!(hex(c), tok(k), "{k}");
-    }
-    let th = |k: &str| t["threshold"][k]["$value"].as_f64().unwrap() as f32;
-    assert_eq!(render::WARN, th("meter-warn"));
-    assert_eq!(render::CRIT, th("meter-crit"));
+    let th = |k: &str| base["threshold"][k]["$value"].as_f64().unwrap() as f32;
+    assert_eq!(palette::METER_WARN, th("meter-warn"));
+    assert_eq!(palette::METER_CRIT, th("meter-crit"));
 }
 
 #[test]
