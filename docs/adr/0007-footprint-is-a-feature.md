@@ -3,7 +3,7 @@
 A system monitor that costs noticeable CPU, memory or disk distorts what it measures, and it loses the trust of the people it is meant to help. Small size and low overhead are therefore requirements, not later polish.
 
 Targets for x64 with the default config and the Panel closed:
-- **Executable:** about 7 MiB. This is a guideline that keeps the binary small, not a hard limit: a change that does the right thing may cost bytes, and its PR says how many. CI reports the size and never fails on it.
+- **Executable:** about 7 MiB. This is a guideline that keeps the binary small, not a hard limit: a change that does the right thing may cost bytes, and its PR says how many. CI reports the size and raises a warning above 7 MiB so the cost gets evaluated; it never fails on it.
 - **CPU:** under 1% of one core.
 - **Working set:** under 40 MB.
 
