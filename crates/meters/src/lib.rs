@@ -22,7 +22,14 @@ impl Series {
     }
 }
 
-fn series(section: Section, h: &History, config: &Config, shown: &[Readout], n: usize) -> Series {
+fn series(
+    section: Section,
+    h: &History,
+    config: &Config,
+    shown: &[Readout],
+    n: usize,
+    now: u64,
+) -> Series {
     if section == Section::Latency {
         let raw = h.recent(&Key::Probe(config.primary.clone()), n);
         let latency = shown.contains(&Readout::Ping(Ping::Latency));
@@ -30,7 +37,7 @@ fn series(section: Section, h: &History, config: &Config, shown: &[Readout], n: 
         if !latency {
             return Series::Loss(raw.iter().map(|r| loss && r.is_none()).collect());
         }
-        let scale = latency_scale(h.now(&config.primary).baseline_ms);
+        let scale = latency_scale(h.now(&config.primary, now).and_then(|s| s.baseline_ms));
         return Series::Latency(
             raw.into_iter()
                 .map(|r| match r {
@@ -76,10 +83,11 @@ pub fn draw(
     shown: &[Readout],
     px: u32,
     taskbar: Taskbar,
+    now: u64,
 ) -> Image {
     meter(
         section,
-        &series(section, h, config, shown, px as usize).meter(),
+        &series(section, h, config, shown, px as usize, now).meter(),
         px,
         &config.appearance.palette(taskbar),
     )
@@ -99,16 +107,22 @@ fn normalize(m: Metric, raw: &[Option<f32>]) -> Vec<f32> {
 }
 
 /// The Latency Meter's Probe summarized as the user chose (default: median over 30 s).
-fn primary_summary(h: &History, config: &Config) -> history::Summary {
+fn primary_summary(h: &History, config: &Config, now: u64) -> history::Summary {
     let v = config.probe_view(&config.primary);
-    h.aggregate(&config.primary, v.window_secs, v.aggregate)
+    h.aggregate(&config.primary, now, v.window_secs, v.aggregate)
 }
 
-fn value_text(section: Section, h: &History, config: &Config, shown: &[Readout]) -> String {
+fn value_text(
+    section: Section,
+    h: &History,
+    config: &Config,
+    shown: &[Readout],
+    now: u64,
+) -> String {
     let s = h.last_sample();
     let get = |m| s.map(|s| s.get(m)).unwrap_or(0.0);
     if section == Section::Latency {
-        let st = primary_summary(h, config);
+        let st = primary_summary(h, config, now);
         let loss = format!("{:.0}%", st.loss * 100.0);
         return match (shown.contains(&Readout::Ping(Ping::Latency)), st.value) {
             (false, _) => format!("{loss} loss"),
@@ -142,6 +156,7 @@ pub fn strip(
     scale: f32,
     font: Option<&FontRef>,
     taskbar: Taskbar,
+    now: u64,
 ) -> Image {
     let owned: Vec<(Section, String, Series)> = Section::ALL
         .into_iter()
@@ -150,8 +165,8 @@ pub fn strip(
             (!shown.is_empty()).then(|| {
                 (
                     section,
-                    value_text(section, h, config, shown),
-                    series(section, h, config, shown, 60),
+                    value_text(section, h, config, shown, now),
+                    series(section, h, config, shown, 60, now),
                 )
             })
         })
@@ -180,6 +195,7 @@ pub fn menu_icon(
     findings: &[verdict::Finding],
     px: u32,
     taskbar: Taskbar,
+    now: u64,
 ) -> Image {
     match config.menu_icon {
         MenuIcon::App => render::app_icon(px, &config.appearance.palette(taskbar), None),
@@ -197,7 +213,7 @@ pub fn menu_icon(
                 .into_iter()
                 .find(|l| !l.is_empty())
                 .map_or(&[][..], |l| l);
-            draw(section, h, config, shown, px, taskbar)
+            draw(section, h, config, shown, px, taskbar, now)
         }
     }
 }
@@ -208,6 +224,7 @@ pub fn tooltip(
     h: &History,
     config: &Config,
     findings: &[verdict::Finding],
+    now: u64,
 ) -> String {
     let s = h.last_sample();
     let get = |m| s.map(|s| s.get(m)).unwrap_or(0.0);
@@ -234,7 +251,7 @@ pub fn tooltip(
             get(Metric::DiskResponse)
         ),
         Section::Latency => {
-            let st = primary_summary(h, config);
+            let st = primary_summary(h, config, now);
             let v = config.probe_view(&config.primary);
             let rtt = st
                 .value
@@ -272,7 +289,15 @@ mod tests {
         fixtures::populate(&mut h, &s, 1_800_000_000);
         let c = Config::default();
         for section in Section::ALL {
-            let img = draw(section, &h, &c, &c.section(section).tray, 24, Taskbar::Dark);
+            let img = draw(
+                section,
+                &h,
+                &c,
+                &c.section(section).tray,
+                24,
+                Taskbar::Dark,
+                1_800_000_000,
+            );
             assert_eq!(img.width(), 24);
             assert!(
                 img.pixels().iter().any(|p| p.alpha() == 255),
@@ -291,7 +316,7 @@ mod tests {
             headline: "x".repeat(300),
         }];
         for section in Section::ALL {
-            assert!(tooltip(section, &h, &Config::default(), &long).len() < 128);
+            assert!(tooltip(section, &h, &Config::default(), &long, 1_800_000_000).len() < 128);
         }
     }
 }

@@ -137,7 +137,8 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
             .unwrap();
         let mut h = history::History::open(None, config::Config::default().history_limits());
         fixtures::populate(&mut h, &s, NOW);
-        let findings = engine::diagnose(&h, &engine::Network::default());
+        let order = engine::probe_order(&config::Config::default());
+        let findings = engine::diagnose(&h, &engine::Network::default(), NOW, &order);
         let processes = fixtures::processes();
         let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
         let mut config = config::Config::default();
@@ -210,8 +211,24 @@ fn strips(out: &std::path::Path) -> Vec<(String, String)> {
         .map(|s| {
             let mut h = history::History::open(None, config::Config::default().history_limits());
             fixtures::populate(&mut h, s, NOW);
-            let dark = meters::strip(&h, &config, height, scale, font.as_ref(), Taskbar::Dark);
-            let light = meters::strip(&h, &config, height, scale, font.as_ref(), Taskbar::Light);
+            let dark = meters::strip(
+                &h,
+                &config,
+                height,
+                scale,
+                font.as_ref(),
+                Taskbar::Dark,
+                NOW,
+            );
+            let light = meters::strip(
+                &h,
+                &config,
+                height,
+                scale,
+                font.as_ref(),
+                Taskbar::Light,
+                NOW,
+            );
             let w = dark.width() + (220.0 * scale) as u32;
             let mut bar = Pixmap::new(w, 2 * height).unwrap();
             bar.fill(Color::from_rgba8(0x1c, 0x1c, 0x1c, 0xff));

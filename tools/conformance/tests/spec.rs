@@ -1,3 +1,7 @@
+use history::Row;
+use history::archive::Archive;
+use history::pause::Pause;
+use history::range::{GraphPoint, Range, Source, Sources, State};
 use model::{Metric, Probe, ProbeStat, Sample};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
@@ -105,6 +109,8 @@ fn verdict() {
             path_up: i["path_up"].as_bool().unwrap_or(true),
             via_vpn: i["via_vpn"].as_bool().unwrap_or(false),
             captive_portal: i["captive_portal"].as_bool().unwrap_or(false),
+            since_pause_s: i["since_pause_s"].as_u64(),
+            window_s: limits().recent_window_s,
         });
         assert_eq!(json!(got), v["expected"], "verdict/{name}");
     }
@@ -112,33 +118,39 @@ fn verdict() {
 
 #[test]
 fn probe_stats() {
-    let probe = icmp_1111();
     for (name, v) in vectors("probe-stats") {
-        let ram_min = (v["ram_s"].as_u64().unwrap() / 60) as u32;
-        let mut h = history::History::open(
-            None,
-            history::Limits {
-                ram_minutes: ram_min,
-                ..limits()
-            },
-        );
-        for r in v["results"].as_array().unwrap() {
-            h.record_probe(&model::ProbeResult {
-                probe: probe.clone(),
-                at: r["at"].as_u64().unwrap(),
-                rtt_ms: opt(&r["rtt_ms"]),
-            });
-        }
+        let results: Vec<(u64, Option<f32>)> = v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["at"].as_u64().unwrap(), opt(&r["rtt_ms"])))
+            .collect();
+        let window_s = v["window_s"].as_u64().unwrap();
         assert_eq!(
-            v["window_s"].as_u64().unwrap(),
+            window_s,
             limits().recent_window_s,
             "probe-stats/{name} window"
         );
-        assert_eq!(
-            stat_json(&h.now(&probe)),
-            v["expected"],
-            "probe-stats/{name}"
+        let got = history::probe_stats(
+            &results,
+            v["now"].as_u64().unwrap(),
+            window_s,
+            v["raw_s"].as_u64().unwrap(),
         );
+        let want = &v["expected"];
+        match got {
+            None => assert!(want.is_null(), "probe-stats/{name}: no stats, want {want}"),
+            Some(st) => {
+                let got = stat_json(&st);
+                for k in ["loss", "rtt_ms", "baseline_ms", "jitter_ms"] {
+                    let close = match (got[k].as_f64(), want[k].as_f64()) {
+                        (Some(a), Some(b)) => (a - b).abs() <= 0.01,
+                        (a, b) => a.is_none() && b.is_none(),
+                    };
+                    assert!(close, "probe-stats/{name} {k}: got {got}, want {want}");
+                }
+            }
+        }
     }
 }
 
@@ -231,7 +243,7 @@ fn bits_json(v: f64) -> Value {
     json!({"value": v, "bits": format!("{:016x}", v.to_bits())})
 }
 
-fn minute_json(m: &history::Minute) -> Value {
+fn row_json(m: &history::Row) -> Value {
     json!({
         "n": m.n, "lost": m.lost,
         "sum": (m.n > 0).then(|| bits_json(m.sum)),
@@ -256,16 +268,16 @@ fn sketch() {
             "sketch rep of {v}"
         );
     }
-    let minutes: Vec<history::Minute> = load("vectors/sketch/minutes.json")["cases"]
+    let minutes: Vec<history::Row> = load("vectors/sketch/minutes.json")["cases"]
         .as_array()
         .unwrap()
         .iter()
         .map(|c| {
             let values: Vec<Option<f32>> =
                 c["values"].as_array().unwrap().iter().map(opt).collect();
-            let m = history::Minute::of(&values);
+            let m = history::Row::of(&values);
             assert_eq!(
-                exact(minute_json(&m)),
+                exact(row_json(&m)),
                 exact(c["minute"].clone()),
                 "sketch minute of {values:?}"
             );
@@ -273,12 +285,12 @@ fn sketch() {
         })
         .collect();
     let merge = load("vectors/sketch/merge.json");
-    let mut acc = history::Minute::default();
+    let mut acc = history::Row::default();
     for m in &minutes {
         acc.merge(m);
     }
     assert_eq!(
-        exact(minute_json(&acc)),
+        exact(row_json(&acc)),
         exact(merge["merged"].clone()),
         "sketch merge"
     );
@@ -451,128 +463,310 @@ fn history_timing() {
     }
 }
 
-#[test]
-fn history_minutes() {
-    let probe = icmp_1111();
-    let key = history::Key::Probe(probe.clone());
-    for (i, c) in load("vectors/history/minutes.json")["cases"]
-        .as_array()
+fn results(v: &Value) -> Vec<(u64, Option<f32>)> {
+    v.as_array()
         .unwrap()
         .iter()
-        .enumerate()
-    {
-        let db = std::env::temp_dir().join(format!(
-            "bg-conformance-minutes-{}-{i}.db",
-            std::process::id()
-        ));
-        let _ = fs::remove_file(&db);
-        let timeout = c["max_timeout_ms"].as_u64().unwrap();
-        let mut h = history::History::open(
-            Some(&db),
-            history::Limits {
-                minute_grace_s: timeout.div_ceil(1000) + 1,
-                ..limits()
-            },
-        );
-        let mut seen = std::collections::BTreeSet::new();
-        for (at, want) in c["arrivals"]
-            .as_array()
-            .unwrap()
+        .map(|r| (r["at"].as_u64().unwrap(), opt(&r["rtt_ms"])))
+        .collect()
+}
+
+fn pauses(v: &Value) -> Vec<Pause> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| Pause {
+                    begin: p["begin"].as_f64().unwrap(),
+                    end: p["end"].as_f64().unwrap(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn paused_json(a: &Archive) -> Value {
+    json!(
+        a.paused
             .iter()
-            .zip(c["expected"].as_array().unwrap())
-        {
-            h.record_probe(&model::ProbeResult {
-                probe: probe.clone(),
-                at: at.as_u64().unwrap(),
-                rtt_ms: Some(1.0),
-            });
-            let now: Vec<u64> = h
-                .minutes(&key, 0, u64::MAX / 2)
-                .into_iter()
-                .map(|(m, _)| m)
-                .filter(|m| seen.insert(*m))
-                .collect();
-            assert_eq!(json!(now), *want, "{} after {at}", c["name"]);
-        }
-        // Every arrival in a written minute, late ones included, is counted there.
-        let stored = h.minutes(&key, 0, u64::MAX / 2);
-        let n: u64 = stored.iter().map(|(_, m)| m.n).sum();
-        let due = c["arrivals"]
-            .as_array()
-            .unwrap()
+            .map(|(m, s)| json!({"m": m, "paused_s": s}))
+            .collect::<Vec<_>>()
+    )
+}
+
+fn rows_json(a: &Archive) -> Value {
+    json!(
+        a.rows
             .iter()
-            .filter(|a| {
-                stored
-                    .iter()
-                    .any(|(m, _)| a.as_u64().unwrap() / 60 * 60 == *m)
+            .map(|(m, r)| {
+                let mut j = row_json(r);
+                j["m"] = json!(m);
+                j
             })
-            .count();
-        assert_eq!(n as usize, due, "{}", c["name"]);
-        drop(h);
-        let _ = fs::remove_file(&db);
+            .collect::<Vec<_>>()
+    )
+}
+
+/// An Archive given as Rows built from their values, plus Paused seconds per step.
+fn archive(step: u64, rows: &Value, paused: &Value) -> Archive {
+    let rows: Vec<(u64, Row)> = rows.as_array().map_or(vec![], |rs| {
+        rs.iter()
+            .map(|r| {
+                let vs: Vec<Option<f32>> =
+                    r["values"].as_array().unwrap().iter().map(opt).collect();
+                (r["m"].as_u64().unwrap(), Row::of(&vs))
+            })
+            .collect()
+    });
+    let paused = paused.as_array().map_or(vec![], |ps| {
+        ps.iter()
+            .map(|p| (p["m"].as_u64().unwrap(), p["paused_s"].as_f64().unwrap()))
+            .collect()
+    });
+    let mut a = Archive { step, rows, paused };
+    // Vectors list Rows in any order; an Archive keeps them ascending.
+    a.rows.sort_by_key(|r| r.0);
+    a.paused.sort_by_key(|p| p.0);
+    a
+}
+
+#[test]
+fn history_rounds() {
+    for c in load("vectors/history/rounds.json")["cases"]
+        .as_array()
+        .unwrap()
+    {
+        let ps = pauses(&c["pauses"]);
+        let recorded: Vec<u64> = c["rounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                !history::pause::cut(
+                    r["start"].as_f64().unwrap(),
+                    r["end"].as_f64().unwrap(),
+                    &ps,
+                )
+            })
+            .map(|r| r["start"].as_f64().unwrap().floor() as u64)
+            .collect();
+        assert_eq!(
+            json!(recorded),
+            c["expected"],
+            "history/rounds {}",
+            c["name"]
+        );
+    }
+}
+
+#[test]
+fn history_raw() {
+    let v = load("vectors/history/raw.json");
+    for c in v["retention"].as_array().unwrap() {
+        let (now, raw_s) = (c["now"].as_u64().unwrap(), c["raw_s"].as_u64().unwrap());
+        let kept: Vec<u64> = c["ats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_u64().unwrap())
+            .filter(|at| history::pause::raw_keeps(*at, now, raw_s))
+            .collect();
+        assert_eq!(json!(kept), c["expected"], "history/raw {}", c["name"]);
+    }
+    for c in v["kill"].as_array().unwrap() {
+        let p = Pause::after_kill(
+            c["newest_at"].as_u64().unwrap(),
+            c["launch"].as_f64().unwrap(),
+            c["settle_s"].as_f64().unwrap(),
+        );
+        assert_eq!(
+            json!({"begin": p.begin, "end": p.end}),
+            c["expected"],
+            "history/raw {}",
+            c["name"]
+        );
+    }
+}
+
+#[test]
+fn history_rows() {
+    let v = load("vectors/history/rows.json");
+    let g = history::archive::grace_s(v["max_timeout_ms"].as_u64().unwrap());
+    let (res, ps) = (results(&v["results"]), pauses(&v["pauses"]));
+    let step = v["step_s"].as_u64().unwrap();
+    for c in v["checks"].as_array().unwrap() {
+        let now = c["now"].as_u64().unwrap();
+        let a1 = Archive::from_raw(&res, &ps, step, now, g);
+        assert_eq!(
+            exact(rows_json(&a1)),
+            exact(c["rows"].clone()),
+            "history/rows at {now}"
+        );
+        assert_eq!(
+            paused_json(&a1),
+            c["paused"],
+            "history/rows paused at {now}"
+        );
+    }
+}
+
+#[test]
+fn history_archives() {
+    let v = load("vectors/history/archives.json");
+    let steps: Vec<u64> = limits_archives().iter().map(|a| a.step_s).collect();
+    let a1 = archive(steps[0], &v["a1"], &v["a1_paused"]);
+    let a2 = a1.merge(steps[1]);
+    let a3 = a2.merge(steps[2]);
+    let e = &v["expected"];
+    for (name, a) in [("a2", &a2), ("a3", &a3)] {
+        assert_eq!(
+            exact(rows_json(a)),
+            exact(e[name].clone()),
+            "history/archives {name}"
+        );
+        assert_eq!(
+            paused_json(a),
+            e[&format!("{name}_paused")],
+            "history/archives {name} paused"
+        );
+    }
+    for c in v["retention"].as_array().unwrap() {
+        let mut a = Archive {
+            step: c["step_s"].as_u64().unwrap(),
+            rows: c["ms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| (m.as_u64().unwrap(), Row::of(&[Some(1.0)])))
+                .collect(),
+            paused: vec![],
+        };
+        a.retain(c["now"].as_u64().unwrap(), c["rows"].as_u64().unwrap());
+        let kept: Vec<u64> = a.rows.iter().map(|r| r.0).collect();
+        assert_eq!(json!(kept), c["expected"], "history/archives {}", c["name"]);
+    }
+}
+
+fn limits_archives() -> Vec<config::defaults::ArchiveDefaults> {
+    config::defaults::get().history.archives
+}
+
+fn range(name: &str) -> Range {
+    match name {
+        "1m" => Range::Min1,
+        "15m" => Range::Min15,
+        "1h" => Range::Hour,
+        "24h" => Range::Day,
+        "7d" => Range::Week,
+        "all" => Range::All,
+        _ => panic!("unknown range {name}"),
     }
 }
 
 #[test]
 fn history_ranges() {
+    let steps: Vec<u64> = limits_archives().iter().map(|a| a.step_s).collect();
     for r in load("vectors/history/ranges.json")["ranges"]
         .as_array()
         .unwrap()
     {
-        let w = history::bucket_width(r["span_s"].as_u64().unwrap());
-        assert_eq!(w, r["ram_bucket_s"].as_u64().unwrap(), "{}", r["range"]);
+        let name = r["range"].as_str().unwrap();
+        let got = range(name);
+        let source = match got.source() {
+            Source::Raw => "raw",
+            Source::A1 => "a1",
+            Source::A2 => "a2",
+            Source::A3 => "a3",
+        };
         assert_eq!(
-            w.div_ceil(60) * 60,
-            r["storage_bucket_s"].as_u64().unwrap(),
-            "{}",
-            r["range"]
+            json!({"range": name, "source": source, "span_s": got.span_s(), "width_s": got.width_s()}),
+            *r,
+            "history/ranges {name}"
         );
+        // A range drawn from an Archive has its step as point width.
+        if let Some(i) = ["a1", "a2", "a3"].iter().position(|s| *s == source) {
+            assert_eq!(got.width_s(), steps[i], "history/ranges {name} step");
+        }
+    }
+}
+
+fn point_json(p: &GraphPoint) -> Value {
+    json!({
+        "at": p.at,
+        "loss": p.loss,
+        "provisional": p.provisional,
+        "state": match p.state { State::Value => "value", State::Lost => "lost", State::Paused => "paused" },
+        "value": p.value.map(bits_json),
+    })
+}
+
+fn graph_case(file: &str, v: &Value, c: &Value) -> Vec<GraphPoint> {
+    let steps: Vec<u64> = limits_archives().iter().map(|a| a.step_s).collect();
+    let a1 = archive(steps[0], &c["a1"], &c["a1_paused"]);
+    let a2 = archive(steps[1], &c["a2"], &c["a2_paused"]);
+    let a3 = archive(steps[2], &c["a3"], &c["a3_paused"]);
+    let raw = if c["results"].is_array() {
+        results(&c["results"])
+    } else if c["raw"].is_array() {
+        results(&c["raw"])
+    } else {
+        vec![]
+    };
+    let ps = pauses(&c["pauses"]);
+    let src = Sources {
+        raw: &raw,
+        pauses: &ps,
+        archives: [&a1, &a2, &a3],
+        g: history::archive::grace_s(v["max_timeout_ms"].as_u64().unwrap()),
+    };
+    let agg = model::Aggregate::ALL
+        .into_iter()
+        .find(|a| a.label() == v["aggregate"].as_str().unwrap())
+        .unwrap_or_else(|| panic!("{file}: aggregate"));
+    let r = c["range"].as_str().map_or(Range::All, range);
+    history::range::graph(r, c["now"].as_u64().unwrap(), &src, agg)
+}
+
+fn assert_points(got: &[GraphPoint], want: &Value, what: &str) {
+    let want = want.as_array().unwrap();
+    assert_eq!(got.len(), want.len(), "{what}: point count");
+    for (g, w) in got.iter().zip(want) {
+        let mut gj = point_json(g);
+        let (gl, wl) = (gj["loss"].take(), &w["loss"]);
+        let mut wj = w.clone();
+        wj["loss"] = Value::Null;
+        assert_eq!(exact(gj), exact(wj), "{what}: point at {}", g.at);
+        match (gl.as_f64(), wl.as_f64()) {
+            (Some(a), Some(b)) => assert!((a - b).abs() < 1e-9, "{what}: loss at {}", g.at),
+            (a, b) => assert_eq!(a, b, "{what}: loss at {}", g.at),
+        }
     }
 }
 
 #[test]
-fn history_buckets() {
-    let v = load("vectors/history/buckets.json");
-    let ram: Vec<(u64, Option<f32>)> = v["ram"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| (r["at"].as_u64().unwrap(), opt(&r["v"])))
-        .collect();
-    let stored: Vec<(u64, history::Minute)> = v["stored"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|m| {
-            let mut vals =
-                vec![m["max"].as_f64().map(|x| x as f32); m["n"].as_u64().unwrap() as usize];
-            vals.extend(std::iter::repeat_n(
-                None,
-                m["lost"].as_u64().unwrap() as usize,
-            ));
-            (m["m"].as_u64().unwrap(), history::Minute::of(&vals))
-        })
-        .collect();
-    let written = v["written_through"].as_u64().unwrap();
-    for c in v["cases"].as_array().unwrap() {
-        let (now, span) = (c["now"].as_u64().unwrap(), c["span_s"].as_u64().unwrap());
-        let pts = history::buckets(
-            now - span,
-            now,
-            history::bucket_width(span),
-            written,
-            ram.iter().copied(),
-            &stored,
-            model::Aggregate::Max,
-        );
-        let got: Vec<Value> = pts
-            .iter()
-            .map(|p| {
-                json!({"at": p.at, "max": (!p.value.is_nan()).then_some(p.value as f64), "loss": r2(p.loss as f64)})
-            })
-            .collect();
-        assert_eq!(json!(got), c["expected"], "buckets {}", c["range"]);
+fn history_graphs() {
+    for (file, v) in vectors("history") {
+        if !file.starts_with("graph-") || file == "graph-all.json" {
+            continue;
+        }
+        for c in v["cases"].as_array().unwrap() {
+            let got = graph_case(&file, &v, c);
+            assert_points(
+                &got,
+                &c["expected"],
+                &format!("history/{file} {}", c["name"]),
+            );
+        }
     }
+}
+
+#[test]
+fn history_graph_all() {
+    let v = load("vectors/history/graph-all.json");
+    let got = graph_case("graph-all.json", &v, &v);
+    let oldest = v["a3"][0]["m"].as_u64().unwrap();
+    let k = history::range::all_k(oldest, v["now"].as_u64().unwrap());
+    assert_eq!(json!(k), v["expected"]["k"], "history/graph-all k");
+    assert_points(&got, &v["expected"]["points"], "history/graph-all");
 }
 
 #[test]

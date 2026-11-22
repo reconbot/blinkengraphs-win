@@ -87,9 +87,16 @@ pub struct HopTraceDefaults {
 
 #[derive(Debug, Deserialize)]
 pub struct HistoryDefaults {
-    pub ram_minutes: u32,
-    pub rollup_days: u32,
+    pub raw_minutes: u32,
     pub recent_window_s: u64,
+    /// A1, A2, A3 in order (spec `rules/history.md`, Archives).
+    pub archives: Vec<ArchiveDefaults>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArchiveDefaults {
+    pub step_s: u64,
+    pub rows: u64,
 }
 
 pub fn get() -> Defaults {
@@ -141,5 +148,7 @@ mod tests {
                 .iter()
                 .any(|t| t.target.to_string() == "9.9.9.9")
         );
+        let steps: Vec<u64> = d.history.archives.iter().map(|a| a.step_s).collect();
+        assert_eq!(steps, [300, 3600, 86_400]);
     }
 }

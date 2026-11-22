@@ -16,6 +16,8 @@ pub enum FaultDomain {
     Vpn,
     /// A sign-in page holds back the internet.
     CaptivePortal,
+    /// Measurements resuming after a Pause; never a fault.
+    Paused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -46,6 +48,10 @@ pub struct Input<'a> {
     pub via_vpn: bool,
     /// Whether a sign-in page holds back the internet (spec `rules/verdict.md`, Captive Portal).
     pub captive_portal: bool,
+    /// Seconds since the last Pause ended; `None` when none has since launch.
+    pub since_pause_s: Option<u64>,
+    /// The Probe stats window (spec `defaults.json` `history.recent_window_s`).
+    pub window_s: u64,
 }
 
 const LOSS_WARN: f32 = 0.05;
@@ -54,7 +60,13 @@ const INFLATED: f32 = 3.0;
 
 /// Most severe first; never empty.
 pub fn diagnose(input: &Input) -> Vec<Finding> {
-    let mut out = if input.path_up {
+    let mut out = if input.path_up && resuming(input) {
+        vec![Finding {
+            domain: FaultDomain::Paused,
+            severity: Severity::Ok,
+            headline: "Resuming measurements".into(),
+        }]
+    } else if input.path_up {
         network(input)
     } else {
         vec![Finding {
@@ -73,6 +85,20 @@ pub fn diagnose(input: &Input) -> Vec<Finding> {
     }
     out.sort_by_key(|f| std::cmp::Reverse(f.severity));
     out
+}
+
+/// Right after a Pause no Probe has stats yet; that is not a fault (spec `rules/verdict.md`, Resuming).
+fn resuming(input: &Input) -> bool {
+    let measured = input.probes.iter().any(|(p, _)| {
+        p.target == Target::Gateway
+            || !matches!(p.target, Target::SystemResolver) && p.protocol != Protocol::Dns
+    });
+    !measured && input.since_pause_s.is_some_and(|s| s < input.window_s)
+}
+
+/// Loss as shown, a whole percent, so a fraction can't flip which Probe a headline names.
+fn shown(loss: f32) -> u32 {
+    (loss * 100.0).round() as u32
 }
 
 fn network(input: &Input) -> Vec<Finding> {
@@ -216,7 +242,14 @@ fn network(input: &Input) -> Vec<Finding> {
         } else if let Some(bad) = internet
             .iter()
             .filter(|p| p.1.loss >= LOSS_WARN)
-            .max_by(|a, b| a.1.loss.total_cmp(&b.1.loss))
+            // The first of equals wins: Probe Group order (spec `rules/verdict.md`).
+            .reduce(|a, b| {
+                if shown(b.1.loss) > shown(a.1.loss) {
+                    b
+                } else {
+                    a
+                }
+            })
         {
             let all_bad = internet.iter().all(|p| p.1.loss >= LOSS_WARN);
             if all_bad {
@@ -353,7 +386,7 @@ fn warn(domain: FaultDomain, headline: String) -> Finding {
 }
 
 fn pct(f: f32) -> String {
-    format!("{:.0}%", f * 100.0)
+    format!("{}%", shown(f))
 }
 
 pub fn bytes(b: f64) -> String {
@@ -406,6 +439,8 @@ mod tests {
             path_up: true,
             via_vpn: false,
             captive_portal: false,
+            since_pause_s: None,
+            window_s: 30,
         })
     }
 
@@ -521,6 +556,8 @@ mod tests {
             path_up: false,
             via_vpn: false,
             captive_portal: false,
+            since_pause_s: None,
+            window_s: 30,
         });
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].domain, FaultDomain::Offline);
@@ -585,6 +622,8 @@ mod tests {
             path_up: true,
             via_vpn: true,
             captive_portal: false,
+            since_pause_s: None,
+            window_s: 30,
         })
     }
 
