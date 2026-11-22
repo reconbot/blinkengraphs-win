@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.3.0...v1.4.0) (2026-11-22)
+
+
+### Features
+
+* defaults from the spec's defaults.json with defaults.override.json merged over it ([#19](https://github.com/reconbot/blinkengraphs-win/issues/19)) ([eb3f313](https://github.com/reconbot/blinkengraphs-win/commit/eb3f313efe1473a9034a8eececebea9f5a4b1104))
+* MSI installer for per-user or per-machine installs, with the spec's brand icon ([#18](https://github.com/reconbot/blinkengraphs-win/issues/18)) ([a56dbdd](https://github.com/reconbot/blinkengraphs-win/commit/a56dbddd26d783c7f207f84c47350410642f13a8))
+* Offline Fault Domain, IPv6 Probes and Hop Trace, per-family Verdict rule, Hop names; pin spec v1.4.0 ([#21](https://github.com/reconbot/blinkengraphs-win/issues/21)) ([5220517](https://github.com/reconbot/blinkengraphs-win/commit/5220517777f61877b5b53a49e7bf9e493f8cf73e))
+
 ## [1.3.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.2.0...v1.3.0) (2026-11-21)
 
 
