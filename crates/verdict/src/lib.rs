@@ -10,6 +10,8 @@ pub enum FaultDomain {
     Remote,
     IcmpFiltering,
     SelfSaturation,
+    /// No usable network path at all: airplane mode, radios off, cable out.
+    Offline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -32,6 +34,9 @@ pub struct Input<'a> {
     pub probes: &'a [(Probe, ProbeStat)],
     /// Highest upload rate seen in RAM History; stands in for the unknown link capacity.
     pub upload_peak_bps: f64,
+    /// Whether the OS reports any usable network path. Without one, Probes are paused and
+    /// their stats only say the device is offline.
+    pub path_up: bool,
 }
 
 const LOSS_WARN: f32 = 0.05;
@@ -39,7 +44,7 @@ const LOSS_DOWN: f32 = 0.5;
 const INFLATED: f32 = 3.0;
 
 /// Findings for the current state of `h`: recent Probe stats, last Sample, upload peak over RAM.
-pub fn from_history(h: &history::History) -> Vec<Finding> {
+pub fn from_history(h: &history::History, path_up: bool) -> Vec<Finding> {
     let probes: Vec<(Probe, ProbeStat)> = h
         .probes()
         .into_iter()
@@ -57,12 +62,21 @@ pub fn from_history(h: &history::History) -> Vec<Finding> {
         sample: h.last_sample(),
         probes: &probes,
         upload_peak_bps: peak,
+        path_up,
     })
 }
 
 /// Most severe first; never empty.
 pub fn diagnose(input: &Input) -> Vec<Finding> {
-    let mut out = network(input);
+    let mut out = if input.path_up {
+        network(input)
+    } else {
+        vec![Finding {
+            domain: FaultDomain::Offline,
+            severity: Severity::Crit,
+            headline: "No network connection".into(),
+        }]
+    };
     out.extend(local(input));
     if out.is_empty() {
         out.push(Finding {
@@ -328,6 +342,7 @@ mod tests {
             sample,
             probes,
             upload_peak_bps: 5e6,
+            path_up: true,
         })
     }
 
@@ -428,5 +443,32 @@ mod tests {
             (FaultDomain::LocalLoad, Severity::Crit)
         );
         assert_eq!(f.len(), 2);
+    }
+
+    #[test]
+    fn offline_replaces_every_network_rule() {
+        let probes = [
+            (p(Protocol::Icmp, "1.1.1.1"), lost()),
+            (p(Protocol::Dns, "dns"), lost()),
+        ];
+        let got = diagnose(&Input {
+            sample: None,
+            probes: &probes,
+            upload_peak_bps: 0.0,
+            path_up: false,
+        });
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].domain, FaultDomain::Offline);
+        assert_eq!(got[0].severity, Severity::Crit);
+        assert_eq!(got[0].headline, "No network connection");
+    }
+
+    fn lost() -> ProbeStat {
+        ProbeStat {
+            loss: 1.0,
+            rtt_ms: None,
+            baseline_ms: Some(10.0),
+            jitter_ms: None,
+        }
     }
 }

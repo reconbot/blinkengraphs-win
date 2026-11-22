@@ -137,7 +137,7 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
             .unwrap();
         let mut h = history::History::open(None, 15, 7);
         fixtures::populate(&mut h, &s, NOW);
-        let findings = verdict::from_history(&h);
+        let findings = verdict::from_history(&h, true);
         let processes = fixtures::processes();
         let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
         let mut config = config::Config::default();

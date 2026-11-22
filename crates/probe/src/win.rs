@@ -303,7 +303,7 @@ fn sockaddr_inet(a: &SOCKADDR_INET) -> Option<IpAddr> {
     }
 }
 
-fn default_route() -> Option<MIB_IPFORWARD_ROW2> {
+pub(crate) fn default_route() -> Option<MIB_IPFORWARD_ROW2> {
     let mut dest = SOCKADDR_INET::default();
     dest.Ipv4 = SOCKADDR_IN {
         sin_family: AF_INET,

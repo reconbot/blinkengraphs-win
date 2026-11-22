@@ -10,6 +10,15 @@ pub use trace::{FULL_SWEEP_EVERY, MAX_TTL};
 #[cfg(windows)]
 mod win;
 
+/// Whether the OS has a default route. Without one there is no network path: Probes pause
+/// and the Verdict reports Offline (spec `rules/verdict.md`).
+pub fn path_up() -> bool {
+    #[cfg(windows)]
+    return win::default_route().is_some();
+    #[cfg(not(windows))]
+    true
+}
+
 use model::{HopResult, Probe, ProbeResult, Protocol, Target};
 use std::{
     collections::HashMap,
@@ -191,6 +200,9 @@ impl Ticker {
     }
 
     fn tick(&mut self, shared: &Shared, generation: u64, timeout: Duration) {
+        if !path_up() {
+            return;
+        }
         let at = model::now();
         let mut addrs: HashMap<&Target, Option<IpAddr>> = HashMap::new();
         for p in self.group.probes.iter().chain(&self.group.traces) {

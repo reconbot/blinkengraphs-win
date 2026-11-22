@@ -228,7 +228,7 @@ fn run(
         if let Some(a) = adapters {
             s.adapters = a;
         }
-        s.findings = verdict::from_history(&s.history);
+        s.findings = verdict::from_history(&s.history, probe::path_up());
         s.sample_count += 1;
         drop(s);
         wake();
