@@ -1,7 +1,5 @@
 //! Minimal DNS A-query wire format (RFC 1035 §4.1).
 
-pub const QUERY_NAME: &str = "cloudflare.com";
-
 const FLAG_QR: u16 = 0x8000;
 const FLAG_RD: u16 = 0x0100;
 const TYPE_A: u16 = 1;
@@ -45,6 +43,8 @@ pub fn parse_response(buf: &[u8]) -> Option<Header> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const QUERY_NAME: &str = "cloudflare.com";
 
     #[test]
     fn encodes_a_query_with_recursion_desired() {

@@ -135,7 +135,7 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
             .into_iter()
             .find(|s| s.name == name)
             .unwrap();
-        let mut h = history::History::open(None, 15, 7);
+        let mut h = history::History::open(None, config::Config::default().history_limits());
         fixtures::populate(&mut h, &s, NOW);
         let findings = verdict::from_history(&h, true);
         let processes = fixtures::processes();
@@ -208,7 +208,7 @@ fn strips(out: &std::path::Path) -> Vec<(String, String)> {
     fixtures::all()
         .iter()
         .map(|s| {
-            let mut h = history::History::open(None, 15, 7);
+            let mut h = history::History::open(None, config::Config::default().history_limits());
             fixtures::populate(&mut h, s, NOW);
             let dark = meters::strip(&h, &config, height, scale, font.as_ref(), Taskbar::Dark);
             let light = meters::strip(&h, &config, height, scale, font.as_ref(), Taskbar::Light);

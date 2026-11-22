@@ -57,11 +57,11 @@ fn bound(addr: SocketAddr) -> Option<UdpSocket> {
     UdpSocket::bind((local, 0)).ok()
 }
 
-pub fn dns(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+pub fn dns(addr: SocketAddr, timeout: Duration, name: &str) -> Option<Duration> {
     let socket = bound(addr)?;
     socket.connect(addr).ok()?;
     let id = random_u16();
-    let query = dns::encode_query(id, dns::QUERY_NAME);
+    let query = dns::encode_query(id, name);
     let start = Instant::now();
     let deadline = start + timeout;
     socket.send(&query).ok()?;
@@ -153,13 +153,20 @@ mod tests {
             buf[2] |= 0x80;
             server.send_to(&buf[..n], from).unwrap();
         });
-        assert!(dns(addr, T).is_some());
+        assert!(dns(addr, T, "cloudflare.com").is_some());
         echo.join().unwrap();
     }
 
     #[test]
     fn dns_silence_is_loss() {
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
-        assert!(dns(server.local_addr().unwrap(), Duration::from_millis(100)).is_none());
+        assert!(
+            dns(
+                server.local_addr().unwrap(),
+                Duration::from_millis(100),
+                "cloudflare.com"
+            )
+            .is_none()
+        );
     }
 }

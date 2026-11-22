@@ -156,10 +156,17 @@ pub struct Summary {
     pub loss: f32,
 }
 
-/// Replies kept per Hop.
-pub const HOP_WINDOW: usize = 60;
-/// The window "now" means for loss, RTT and the Verdict.
-pub const RECENT_SECS: u64 = 30;
+/// How much History keeps and what "now" means. Callers fill it from the merged defaults
+/// (spec `defaults.json` `history` and `hop_trace`), plus the user's retention choices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub ram_minutes: u32,
+    pub rollup_days: u32,
+    /// Replies kept per Hop.
+    pub hop_window: usize,
+    /// The window "now" means for loss, RTT and the Verdict.
+    pub recent_window_s: u64,
+}
 
 #[derive(Default)]
 struct HopTrack {
@@ -169,6 +176,8 @@ struct HopTrack {
 }
 
 pub struct History {
+    hop_window: usize,
+    recent_secs: u64,
     ram_secs: u64,
     rollup_secs: u64,
     ram: HashMap<Key, VecDeque<(u64, Option<f32>)>>,
@@ -200,7 +209,7 @@ pub fn estimate_bytes(series: usize, days: u32, measured: Option<Storage>) -> u6
 
 impl History {
     /// `db: None` keeps everything in RAM (tests, or a disk that refuses writes).
-    pub fn open(db: Option<&Path>, ram_minutes: u32, rollup_days: u32) -> Self {
+    pub fn open(db: Option<&Path>, limits: Limits) -> Self {
         let db = db.and_then(|p| {
             if let Some(dir) = p.parent() {
                 std::fs::create_dir_all(dir).ok()?;
@@ -223,8 +232,10 @@ impl History {
             Some(c)
         });
         let mut h = Self {
-            ram_secs: ram_minutes as u64 * 60,
-            rollup_secs: rollup_days as u64 * 86_400,
+            hop_window: limits.hop_window,
+            recent_secs: limits.recent_window_s,
+            ram_secs: limits.ram_minutes as u64 * 60,
+            rollup_secs: limits.rollup_days as u64 * 86_400,
             ram: HashMap::new(),
             hops: HashMap::new(),
             last_sample: None,
@@ -262,7 +273,7 @@ impl History {
         }
         t.reached = h.reached;
         t.rtts.push_back(h.rtt_ms);
-        if t.rtts.len() > HOP_WINDOW {
+        if t.rtts.len() > self.hop_window {
             t.rtts.pop_front();
         }
         if h.reached {
@@ -295,6 +306,11 @@ impl History {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The Probe's stats over the recent window (`Limits::recent_window_s`).
+    pub fn now(&self, probe: &Probe) -> ProbeStat {
+        self.stat(probe, self.recent_secs)
     }
 
     pub fn stat(&self, probe: &Probe, window_secs: u64) -> ProbeStat {
@@ -808,6 +824,15 @@ mod tests {
     use super::*;
     use model::{Protocol, Target};
 
+    fn limits(ram_minutes: u32, rollup_days: u32) -> Limits {
+        Limits {
+            ram_minutes,
+            rollup_days,
+            hop_window: 60,
+            recent_window_s: 30,
+        }
+    }
+
     fn probe() -> Probe {
         Probe {
             target: Target::Addr("1.1.1.1".parse().unwrap()),
@@ -827,7 +852,7 @@ mod tests {
 
     #[test]
     fn aggregate_over_window() {
-        let mut h = History::open(None, 15, 7);
+        let mut h = History::open(None, limits(15, 7));
         feed(&mut h, 1000, 1300, |t| {
             (t % 10 != 0).then_some((t % 100) as f32)
         });
@@ -844,7 +869,7 @@ mod tests {
 
     #[test]
     fn stat_reports_loss_and_baseline() {
-        let mut h = History::open(None, 15, 7);
+        let mut h = History::open(None, limits(15, 7));
         feed(&mut h, 0, 600, |_| Some(10.0));
         feed(&mut h, 600, 630, |t| (t % 2 == 0).then_some(80.0));
         let s = h.stat(&probe(), 30);
@@ -855,7 +880,7 @@ mod tests {
 
     #[test]
     fn ram_is_bounded() {
-        let mut h = History::open(None, 1, 7);
+        let mut h = History::open(None, limits(1, 7));
         feed(&mut h, 0, 500, |_| Some(1.0));
         assert!(h.recent(&Key::Probe(probe()), 1000).len() <= 61);
     }
@@ -864,7 +889,7 @@ mod tests {
     fn rollups_serve_ranges_older_than_ram() {
         let path = std::env::temp_dir().join(format!("bg-history-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let mut h = History::open(Some(&path), 1, 7);
+        let mut h = History::open(Some(&path), limits(1, 7));
         feed(&mut h, 6000, 6000 + 600, |t| {
             if t < 6060 {
                 None
@@ -895,7 +920,7 @@ mod tests {
     fn storage_is_measured_and_estimated() {
         let path = std::env::temp_dir().join(format!("bg-history-size-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let mut h = History::open(Some(&path), 1, 7);
+        let mut h = History::open(Some(&path), limits(1, 7));
         assert_eq!(h.storage(), None);
         feed(&mut h, 6000, 6000 + 300, |t| Some((t % 7) as f32));
         let s = h.storage().unwrap();
@@ -927,7 +952,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("h.db");
         let out = dir.join("h.csv");
-        let mut h = History::open(Some(&db), 1, 7);
+        let mut h = History::open(Some(&db), limits(1, 7));
         feed(&mut h, 6000, 6000 + 300, |t| {
             (t % 30 != 0).then_some((t % 7) as f32)
         });
@@ -953,13 +978,13 @@ mod tests {
         let key = Key::Probe(probe());
         let t0 = (model::now() - 200) / 60 * 60;
         {
-            let mut h = History::open(Some(&path), 15, 7);
+            let mut h = History::open(Some(&path), limits(15, 7));
             feed(&mut h, t0, t0 + 150, |t| {
                 (!(t - t0).is_multiple_of(50)).then_some((t % 9) as f32)
             });
             h.close(t0 + 150);
         }
-        let h = History::open(Some(&path), 15, 7);
+        let h = History::open(Some(&path), limits(15, 7));
         let raw = h.recent(&key, 1000);
         assert_eq!(raw.len(), 150, "1 s samples survive a restart");
         assert_eq!(raw[0], None);
@@ -979,7 +1004,7 @@ mod tests {
 
     #[test]
     fn ram_buckets_are_exact() {
-        let mut h = History::open(None, 15, 7);
+        let mut h = History::open(None, limits(15, 7));
         feed(&mut h, 1000, 1010, |t| Some((t - 1000) as f32));
         let pts = h.series(&Key::Probe(probe()), 1000, 1009, 5, Aggregate::P50);
         assert_eq!(pts.len(), 2);
@@ -1001,7 +1026,7 @@ mod tests {
             )
             .unwrap();
         }
-        let h = History::open(Some(&path), 1, 7);
+        let h = History::open(Some(&path), limits(1, 7));
         let m = h.minutes(&Key::Probe(probe()), 6000, 6060);
         assert_eq!(m.len(), 1);
         assert_eq!((m[0].1.n, m[0].1.lost, m[0].1.max), (1, 1, 20.0));
@@ -1012,7 +1037,7 @@ mod tests {
 
     #[test]
     fn hops_truncate_at_destination() {
-        let mut h = History::open(None, 15, 7);
+        let mut h = History::open(None, limits(15, 7));
         for ttl in 1..=5u8 {
             h.record_hop(&HopResult {
                 trace: probe(),

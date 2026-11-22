@@ -49,6 +49,19 @@ pub struct Defaults {
     pub history: HistoryDefaults,
     pub system_interval_ms: u64,
     pub appearance: crate::Mode,
+    pub graph_aggregate: model::Aggregate,
+    pub readout_aggregate: model::Aggregate,
+    pub captive_portal_url: String,
+    pub public_address: PublicAddressDefaults,
+}
+
+/// Spec `rules/public-address.md`.
+#[derive(Debug, Deserialize)]
+pub struct PublicAddressDefaults {
+    pub dns_name: String,
+    pub dns_server: String,
+    pub https_url: String,
+    pub refresh_s: u64,
 }
 
 #[derive(Debug, Deserialize)]

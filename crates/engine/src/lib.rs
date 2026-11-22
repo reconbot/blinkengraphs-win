@@ -50,11 +50,7 @@ impl Engine {
         wake: impl Fn() + Send + 'static,
         idle: IdleCheck,
     ) -> Self {
-        let history = History::open(
-            db.as_deref(),
-            config.history.ram_minutes,
-            config.history.rollup_days,
-        );
+        let history = History::open(db.as_deref(), config.history_limits());
         let shared = Arc::new(Mutex::new(Shared {
             history,
             findings: vec![],
@@ -137,7 +133,7 @@ fn run(
     idle: IdleCheck,
 ) {
     let mut collector = Collector::new(adapter(&config)).ok();
-    let (prober, events) = Prober::start(groups(&config));
+    let (prober, events) = Prober::start(groups(&config), config.probe_limits());
     let mut next_sample = Instant::now();
     let mut next_procs = Instant::now();
     let mut next_adapters = Instant::now();

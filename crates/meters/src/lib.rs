@@ -30,7 +30,7 @@ fn series(section: Section, h: &History, config: &Config, shown: &[Readout], n: 
         if !latency {
             return Series::Loss(raw.iter().map(|r| loss && r.is_none()).collect());
         }
-        let scale = latency_scale(h.stat(&config.primary, history::RECENT_SECS).baseline_ms);
+        let scale = latency_scale(h.now(&config.primary).baseline_ms);
         return Series::Latency(
             raw.into_iter()
                 .map(|r| match r {
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn meters_render_every_section_from_fixture_history() {
-        let mut h = History::open(None, 15, 7);
+        let mut h = History::open(None, Config::default().history_limits());
         let s = fixtures::all().remove(2);
         fixtures::populate(&mut h, &s, 1_800_000_000);
         let c = Config::default();
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn tooltip_fits_windows_limit() {
-        let mut h = History::open(None, 15, 7);
+        let mut h = History::open(None, Config::default().history_limits());
         fixtures::populate(&mut h, &fixtures::all().remove(1), 1_800_000_000);
         let long = vec![verdict::Finding {
             domain: verdict::FaultDomain::Isp,

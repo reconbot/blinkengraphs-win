@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 model.workspace = true
+history.workspace = true
+probe.workspace = true
 palette.workspace = true
 serde.workspace = true
 toml.workspace = true
