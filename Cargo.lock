@@ -3499,6 +3499,7 @@ dependencies = [
  "config",
  "egui",
  "egui_kittest",
+ "engine",
  "fixtures",
  "history",
  "image",
@@ -4362,7 +4363,6 @@ dependencies = [
 name = "verdict"
 version = "1.4.0"
 dependencies = [
- "history",
  "model",
  "serde",
 ]
