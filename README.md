@@ -6,35 +6,12 @@ Live CPU, memory, disk, network and latency graphs in the Windows 11 taskbar, in
 
 ## Install
 
-Download `blinkengraphs-x64.msi` or `blinkengraphs-arm64.msi` from the [latest release](https://github.com/reconbot/blinkengraphs-win/releases/latest). Run it and choose:
-
-- **Just me** (default): no admin, installs to `%LocalAppData%\Programs\blinkengraphs`.
-- **Everyone**: needs admin, installs to Program Files.
-
-Both add a Start-menu shortcut and start blinkengraphs at sign-in. Running a newer MSI upgrades in place. Uninstall from Settings > Apps; your settings and history in `%APPDATA%\blinkengraphs` stay.
-
-## Deploy
+Run the MSI from a [release](https://github.com/reconbot/blinkengraphs-win/releases/latest) and choose **Just me** or **Everyone**. Settings survive uninstall.
 
 | Scope | Install | Uninstall |
 |---|---|---|
 | Per-user | `msiexec /i blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` | `msiexec /x blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` |
-| Per-machine (admin) | `msiexec /i blinkengraphs-x64.msi /qn ALLUSERS=1` | `msiexec /x blinkengraphs-x64.msi /qn ALLUSERS=1` |
-
-Add `/l*v install.log` to any command for a verbose log. An upgrade only replaces an install of the same scope, so pick one scope per fleet.
-
-**Intune** ([Win32 app docs](https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-win32-add)):
-
-1. Package the MSI with the [Win32 Content Prep Tool](https://learn.microsoft.com/en-us/intune/intune-service/apps/apps-win32-prepare): `IntuneWinAppUtil -c <folder with the msi> -s blinkengraphs-x64.msi -o <out>`.
-2. Add a Windows app (Win32) and use the commands above. Set **Install behavior** to **User** for per-user or **System** for per-machine.
-3. Under **Requirements**, set **Operating system architecture** to match the MSI, x64 or ARM64.
-4. Under **Detection rules**, use the **MSI** rule with the package's product code. Each release has a new product code; read it with:
-   ```powershell
-   $db = (New-Object -ComObject WindowsInstaller.Installer).OpenDatabase("$PWD\blinkengraphs-x64.msi", 0)
-   $v = $db.OpenView("SELECT Value FROM Property WHERE Property='ProductCode'"); $v.Execute(); $v.Fetch().StringData(1)
-   ```
-5. For a new release, add it as a new app that supersedes the old one with **Uninstall previous version** off; the MSI upgrades in place.
-
-Builds are not Authenticode-signed yet, so SmartScreen warns on download. Verify a file's build provenance with `gh attestation verify blinkengraphs-x64.msi -R reconbot/blinkengraphs-win`.
+| Per-machine | `msiexec /i blinkengraphs-x64.msi /qn ALLUSERS=1` | `msiexec /x blinkengraphs-x64.msi /qn ALLUSERS=1` |
 
 ## What it shows
 
