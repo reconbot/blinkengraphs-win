@@ -12,6 +12,8 @@ pub enum FaultDomain {
     SelfSaturation,
     /// No usable network path at all: airplane mode, radios off, cable out.
     Offline,
+    /// The VPN tunnel, or its exit, that the traffic goes through.
+    Vpn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -37,6 +39,9 @@ pub struct Input<'a> {
     /// Whether the OS reports any usable network path. Without one, Probes are paused and
     /// their stats only say the device is offline.
     pub path_up: bool,
+    /// Whether the traffic goes through a VPN tunnel. Findings that would blame the ISP or
+    /// ping filtering then name the VPN. Windows doesn't detect this yet and passes false.
+    pub via_vpn: bool,
 }
 
 const LOSS_WARN: f32 = 0.05;
@@ -63,6 +68,7 @@ pub fn from_history(h: &history::History, path_up: bool) -> Vec<Finding> {
         probes: &probes,
         upload_peak_bps: peak,
         path_up,
+        via_vpn: false,
     })
 }
 
@@ -134,6 +140,14 @@ fn network(input: &Input) -> Vec<Finding> {
         ));
     }
 
+    // Through a VPN, what would blame the ISP or ping filtering is the tunnel or its exit.
+    let vpn = input.via_vpn;
+    let blame = if vpn {
+        FaultDomain::Vpn
+    } else {
+        FaultDomain::Isp
+    };
+
     // One address family down while the other works: say so, then judge only the working one,
     // so a broken IPv6 path never reads as a remote host's problem.
     let family = |v6: bool| -> Vec<_> {
@@ -148,14 +162,24 @@ fn network(input: &Input) -> Vec<Finding> {
     if !v4.is_empty() && !v6.is_empty() {
         if best(&v6) >= LOSS_DOWN && works(&v4) {
             out.push(warn(
-                FaultDomain::Isp,
-                "IPv6 broken; IPv4 works: ISP or router IPv6 problem".into(),
+                blame,
+                if vpn {
+                    "IPv6 broken; IPv4 works: VPN has no IPv6 route"
+                } else {
+                    "IPv6 broken; IPv4 works: ISP or router IPv6 problem"
+                }
+                .into(),
             ));
             internet = v4;
         } else if best(&v4) >= LOSS_DOWN && works(&v6) {
             out.push(crit(
-                FaultDomain::Isp,
-                "IPv4 broken; IPv6 works: ISP or router IPv4 problem".into(),
+                blame,
+                if vpn {
+                    "IPv4 broken; IPv6 works: VPN has no IPv4 route"
+                } else {
+                    "IPv4 broken; IPv6 works: ISP or router IPv4 problem"
+                }
+                .into(),
             ));
             internet = v6;
         }
@@ -177,7 +201,12 @@ fn network(input: &Input) -> Vec<Finding> {
         } else {
             "Gateway OK, "
         };
-        if net_best >= LOSS_DOWN {
+        if net_best >= LOSS_DOWN && vpn {
+            out.push(crit(
+                FaultDomain::Vpn,
+                "Internet unreachable through VPN: VPN or its exit problem".into(),
+            ));
+        } else if net_best >= LOSS_DOWN {
             let headline = if gateway.is_empty() {
                 "Internet unreachable, gateway not measured: ISP or WAN problem".into()
             } else {
@@ -185,10 +214,17 @@ fn network(input: &Input) -> Vec<Finding> {
             };
             out.push(crit(FaultDomain::Isp, headline));
         } else if any_icmp && icmp_lost && tcp_ok {
-            out.push(warn(
-                FaultDomain::IcmpFiltering,
-                "ICMP blocked; TCP gets through: something filters ping".into(),
-            ));
+            out.push(if vpn {
+                warn(
+                    FaultDomain::Vpn,
+                    "ICMP blocked; TCP gets through: VPN filters ping".into(),
+                )
+            } else {
+                warn(
+                    FaultDomain::IcmpFiltering,
+                    "ICMP blocked; TCP gets through: something filters ping".into(),
+                )
+            });
         } else if let Some(bad) = internet
             .iter()
             .filter(|p| p.1.loss >= LOSS_WARN)
@@ -201,14 +237,23 @@ fn network(input: &Input) -> Vec<Finding> {
                 } else {
                     Severity::Warn
                 };
-                out.push(Finding {
-                    domain: FaultDomain::Isp,
-                    severity: sev,
-                    headline: format!(
+                let headline = if vpn {
+                    format!(
+                        "{} losing {} through VPN: VPN or its exit problem",
+                        bad.0.target,
+                        pct(bad.1.loss)
+                    )
+                } else {
+                    format!(
                         "{gw}{} losing {}: ISP problem",
                         bad.0.target,
                         pct(bad.1.loss)
-                    ),
+                    )
+                };
+                out.push(Finding {
+                    domain: blame,
+                    severity: sev,
+                    headline,
                 });
             } else if let Some(good) = internet.iter().find(|p| p.1.loss < LOSS_WARN) {
                 out.push(warn(
@@ -371,6 +416,7 @@ mod tests {
             probes,
             upload_peak_bps: 5e6,
             path_up: true,
+            via_vpn: false,
         })
     }
 
@@ -484,6 +530,7 @@ mod tests {
             probes: &probes,
             upload_peak_bps: 0.0,
             path_up: false,
+            via_vpn: false,
         });
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].domain, FaultDomain::Offline);
@@ -538,6 +585,45 @@ mod tests {
             "IPv4 broken; IPv6 works: ISP or router IPv4 problem"
         );
         assert_eq!(got[0].severity, Severity::Crit);
+    }
+
+    fn via_vpn(probes: &[(Probe, ProbeStat)]) -> Vec<Finding> {
+        diagnose(&Input {
+            sample: None,
+            probes,
+            upload_peak_bps: 5e6,
+            path_up: true,
+            via_vpn: true,
+        })
+    }
+
+    #[test]
+    fn through_a_vpn_a_broken_ipv6_names_the_vpn() {
+        let mut ps = dual();
+        for i in ps.len() - 2..ps.len() {
+            ps[i].1 = lost();
+        }
+        let got = via_vpn(&ps);
+        assert_eq!(got[0].domain, FaultDomain::Vpn);
+        assert_eq!(
+            got[0].headline,
+            "IPv6 broken; IPv4 works: VPN has no IPv6 route"
+        );
+    }
+
+    #[test]
+    fn through_a_vpn_filtered_ping_names_the_vpn() {
+        let mut ps = healthy();
+        for (pr, st) in ps.iter_mut() {
+            if pr.protocol == Protocol::Icmp && pr.target != Target::Gateway {
+                *st = lost();
+            }
+        }
+        let got = via_vpn(&ps);
+        assert_eq!(
+            got[0].headline,
+            "ICMP blocked; TCP gets through: VPN filters ping"
+        );
     }
 
     fn lost() -> ProbeStat {

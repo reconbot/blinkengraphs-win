@@ -68,6 +68,7 @@ struct Case {
     probes: Vec<(Probe, ProbeStat)>,
     upload_peak_bps: f64,
     path_up: bool,
+    via_vpn: bool,
 }
 
 fn verdict_vector(name: &str, c: &Case) -> Value {
@@ -76,6 +77,7 @@ fn verdict_vector(name: &str, c: &Case) -> Value {
         probes: &c.probes,
         upload_peak_bps: c.upload_peak_bps,
         path_up: c.path_up,
+        via_vpn: c.via_vpn,
     });
     let sample = c.sample.as_ref().map(|s| {
         Metric::ALL
@@ -91,6 +93,9 @@ fn verdict_vector(name: &str, c: &Case) -> Value {
     // Absent means true, so the vectors written before the Offline rule stay valid.
     if !c.path_up {
         input["path_up"] = json!(false);
+    }
+    if c.via_vpn {
+        input["via_vpn"] = json!(true);
     }
     json!({"name": name, "input": input, "expected": findings})
 }
@@ -126,6 +131,7 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
                     probes,
                     upload_peak_bps: peak.round(),
                     path_up: true,
+                    via_vpn: false,
                 },
             )
         })
@@ -165,6 +171,7 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
             probes: ps,
             upload_peak_bps: 5e6,
             path_up: true,
+            via_vpn: false,
         }
     };
     cases.push((
@@ -177,6 +184,7 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
                 .collect(),
             upload_peak_bps: 5e6,
             path_up: true,
+            via_vpn: false,
         },
     ));
     let dual = |v4_loss: f32, v6_loss: f32| {
@@ -205,11 +213,52 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
             probes: ps,
             upload_peak_bps: 5e6,
             path_up: true,
+            via_vpn: false,
         }
     };
     cases.push(("dual-stack-clear", dual(0.0, 0.0)));
     cases.push(("ipv6-broken", dual(0.0, 1.0)));
     cases.push(("ipv4-broken", dual(1.0, 0.0)));
+    // Through a VPN: what would blame the ISP or ping filtering names the tunnel.
+    let vpn = |mut c: Case| {
+        c.via_vpn = true;
+        c
+    };
+    cases.push(("vpn-ipv6-broken", vpn(dual(0.0, 1.0))));
+    let internet_loss = |loss: f32, with_gateway: bool| {
+        let probes = healthy()
+            .into_iter()
+            .filter(|(p, _)| with_gateway || p.target != Target::Gateway)
+            .map(|(p, s)| {
+                let internet = !matches!(p.target, Target::Gateway | Target::SystemResolver)
+                    && p.protocol != Protocol::Dns;
+                if internet {
+                    (p, st(loss, 30.0, s.baseline_ms.unwrap()))
+                } else {
+                    (p, s)
+                }
+            })
+            .collect();
+        Case {
+            sample: None,
+            probes,
+            upload_peak_bps: 5e6,
+            path_up: true,
+            via_vpn: true,
+        }
+    };
+    cases.push(("vpn-isp-loss", internet_loss(0.25, true)));
+    cases.push(("vpn-unreachable", internet_loss(1.0, false)));
+    let icmp_filtered = {
+        let mut c = internet_loss(0.0, true);
+        for (p, s) in c.probes.iter_mut() {
+            if p.protocol == Protocol::Icmp && p.target != Target::Gateway {
+                *s = st(1.0, 0.0, s.baseline_ms.unwrap());
+            }
+        }
+        c
+    };
+    cases.push(("vpn-icmp-filtered", icmp_filtered));
     cases.push((
         "offline",
         Case {
@@ -220,6 +269,7 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
                 .collect(),
             upload_peak_bps: 5e6,
             path_up: false,
+            via_vpn: false,
         },
     ));
     cases.push((
