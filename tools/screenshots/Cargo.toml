@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+engine.workspace = true
 model.workspace = true
 render.workspace = true
 fixtures.workspace = true

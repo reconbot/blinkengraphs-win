@@ -1,19 +1,24 @@
-use collect::{AdapterChoice, Collector};
+//! The Monitor: samples the system through [`Sensors`], runs the Prober, records both into
+//! History and keeps the Verdict current. Surfaces read [`Shared`] and send [`Command`]s.
+
+use collect::AdapterChoice;
 use config::{Adapter, Config};
 use history::History;
-use model::ProcessRow;
+use model::{Metric, Probe, ProbeStat, ProcessRow, Sample};
 use probe::{Event, ProbeGroup, Prober};
 use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, RecvTimeoutError, Sender, channel},
     },
     thread,
     time::{Duration, Instant},
 };
 use verdict::Finding;
+
+mod sensors;
+pub use sensors::{Network, Sensors, SystemSensors};
 
 /// Faster than this starves the UI thread for no visible gain.
 const MIN_INTERVAL_MS: u64 = 250;
@@ -30,13 +35,14 @@ pub struct Shared {
 
 pub enum Command {
     Reconfigure(Box<Config>),
+    /// Process rows are collected only while the Panel is open (ADR 0003).
+    PanelOpen(bool),
     /// Save what a restart would lose, reply on the channel, then stop.
-    Shutdown(std::sync::mpsc::Sender<()>),
+    Shutdown(Sender<()>),
 }
 
 pub struct Engine {
     pub shared: Arc<Mutex<Shared>>,
-    pub panel_open: Arc<AtomicBool>,
     commands: Sender<Command>,
 }
 
@@ -50,6 +56,17 @@ impl Engine {
         wake: impl Fn() + Send + 'static,
         idle: IdleCheck,
     ) -> Self {
+        let sensors = SystemSensors::new(adapter(&config));
+        Self::start_with(config, db, sensors, wake, idle)
+    }
+
+    pub fn start_with(
+        config: Config,
+        db: Option<PathBuf>,
+        sensors: impl Sensors + 'static,
+        wake: impl Fn() + Send + 'static,
+        idle: IdleCheck,
+    ) -> Self {
         let history = History::open(db.as_deref(), config.history_limits());
         let shared = Arc::new(Mutex::new(Shared {
             history,
@@ -59,16 +76,17 @@ impl Engine {
             paused: false,
             sample_count: 0,
         }));
-        let panel_open = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
-        let (s, p) = (shared.clone(), panel_open.clone());
+        let s = shared.clone();
         thread::Builder::new()
             .name("engine".into())
-            .spawn(move || run(config, s, p, rx, wake, idle))
+            .spawn(move || {
+                let mut m = Monitor::new(config, s, sensors, idle);
+                run(&mut m, rx, wake)
+            })
             .expect("spawn engine");
         Self {
             shared,
-            panel_open,
             commands: tx,
         }
     }
@@ -79,7 +97,7 @@ impl Engine {
 
     /// Waits up to `timeout` for the engine to save history; a stuck engine must not block Quit.
     pub fn shutdown(&self, timeout: Duration) -> bool {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = channel();
         self.send(Command::Shutdown(tx));
         rx.recv_timeout(timeout).is_ok()
     }
@@ -124,54 +142,111 @@ fn adapter(c: &Config) -> AdapterChoice {
     }
 }
 
-fn run(
-    mut config: Config,
-    shared: Arc<Mutex<Shared>>,
-    panel_open: Arc<AtomicBool>,
-    commands: Receiver<Command>,
-    wake: impl Fn(),
-    idle: IdleCheck,
-) {
-    let mut collector = Collector::new(adapter(&config)).ok();
-    let (prober, events) = Prober::start(groups(&config), config.probe_limits());
-    let mut next_sample = Instant::now();
-    let mut next_procs = Instant::now();
-    let mut next_adapters = Instant::now();
-    let mut paused = false;
+/// The Verdict for what History holds now plus what the OS and network checks report
+/// (spec `rules/verdict.md` inputs): recent Probe stats, the last Sample, the upload peak.
+pub fn diagnose(h: &History, net: &Network) -> Vec<Finding> {
+    let probes: Vec<(Probe, ProbeStat)> = h
+        .probes()
+        .into_iter()
+        .map(|p| {
+            let st = h.now(&p);
+            (p, st)
+        })
+        .collect();
+    let peak = h
+        .recent(&history::Key::Metric(Metric::NetUp), usize::MAX)
+        .into_iter()
+        .flatten()
+        .fold(0.0f32, f32::max) as f64;
+    verdict::diagnose(&verdict::Input {
+        sample: h.last_sample(),
+        probes: &probes,
+        upload_peak_bps: peak,
+        path_up: net.path_up,
+        via_vpn: net.via_vpn,
+        captive_portal: net.captive_portal,
+    })
+}
 
+fn run<S: Sensors>(m: &mut Monitor<S>, commands: Receiver<Command>, wake: impl Fn()) {
     loop {
-        let timeout = next_sample
+        let timeout = m
+            .next_sample
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(250));
         match commands.recv_timeout(timeout) {
-            Ok(Command::Reconfigure(c)) => {
-                if let Some(col) = &mut collector {
-                    col.set_adapter(adapter(&c));
-                }
-                prober.reconfigure(groups(&c));
-                shared
+            Ok(Command::Shutdown(done)) => {
+                m.shared.lock().unwrap().history.close(model::now());
+                let _ = done.send(());
+                return;
+            }
+            Ok(c) => m.command(c),
+            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if m.tick(Instant::now(), model::now()) {
+            wake();
+        }
+    }
+}
+
+struct Monitor<S> {
+    config: Config,
+    shared: Arc<Mutex<Shared>>,
+    sensors: S,
+    prober: Prober,
+    events: Receiver<Event>,
+    idle: IdleCheck,
+    panel_open: bool,
+    paused: bool,
+    next_sample: Instant,
+    next_procs: Instant,
+    next_adapters: Instant,
+}
+
+impl<S: Sensors> Monitor<S> {
+    fn new(config: Config, shared: Arc<Mutex<Shared>>, sensors: S, idle: IdleCheck) -> Self {
+        let (prober, events) = Prober::start(groups(&config), config.probe_limits());
+        let now = Instant::now();
+        Self {
+            config,
+            shared,
+            sensors,
+            prober,
+            events,
+            idle,
+            panel_open: false,
+            paused: false,
+            next_sample: now,
+            next_procs: now,
+            next_adapters: now,
+        }
+    }
+
+    fn command(&mut self, c: Command) {
+        match c {
+            Command::Reconfigure(c) => {
+                self.sensors.set_adapter(adapter(&c));
+                self.prober.reconfigure(groups(&c));
+                self.shared
                     .lock()
                     .unwrap()
                     .history
                     .set_rollup_days(c.history.rollup_days);
-                config = *c;
+                self.config = *c;
             }
-            Ok(Command::Shutdown(done)) => {
-                shared.lock().unwrap().history.close(model::now());
-                let _ = done.send(());
-                return;
-            }
-            Err(RecvTimeoutError::Disconnected) => return,
-            Err(RecvTimeoutError::Timeout) => {}
+            Command::PanelOpen(open) => self.panel_open = open,
+            Command::Shutdown(_) => {}
         }
+    }
 
-        let mut probe_events = Vec::new();
-        while let Ok(e) = events.try_recv() {
-            probe_events.push(e);
-        }
-        if !probe_events.is_empty() {
-            let mut s = shared.lock().unwrap();
-            for e in probe_events {
+    /// Records Probe results, then, when a Sample is due, takes it and updates the Verdict.
+    /// True when Surfaces should redraw.
+    fn tick(&mut self, now: Instant, at: u64) -> bool {
+        let events: Vec<Event> = self.events.try_iter().collect();
+        if !events.is_empty() {
+            let mut s = self.shared.lock().unwrap();
+            for e in events {
                 match e {
                     Event::Probe(r) => s.history.record_probe(&r),
                     Event::Hop(h) => s.history.record_hop(&h),
@@ -179,44 +254,36 @@ fn run(
                 }
             }
         }
-
-        let now = Instant::now();
-        if now < next_sample {
-            continue;
+        if now < self.next_sample {
+            return false;
         }
-        next_sample = now + Duration::from_millis(config.system_interval_ms.max(MIN_INTERVAL_MS));
+        let every = |ms: u64| Duration::from_millis(ms.max(MIN_INTERVAL_MS));
+        self.next_sample = now + every(self.config.system_interval_ms);
 
-        let should_pause = config.pause_when_idle && idle();
-        if should_pause != paused {
-            paused = should_pause;
-            prober.set_paused(paused);
-            shared.lock().unwrap().paused = paused;
+        let pause = self.config.pause_when_idle && (self.idle)();
+        if pause != self.paused {
+            self.paused = pause;
+            self.prober.set_paused(pause);
+            self.shared.lock().unwrap().paused = pause;
         }
-        if paused {
-            continue;
+        if pause {
+            return false;
         }
-
-        let Some(col) = &mut collector else {
-            collector = Collector::new(adapter(&config)).ok();
-            continue;
+        let Some(mut sample): Option<Sample> = self.sensors.sample() else {
+            return false;
         };
-        let mut sample = col.sample();
-        sample.at = model::now();
-        let panel = panel_open.load(Ordering::Relaxed);
-        let procs = (panel && now >= next_procs).then(|| {
-            next_procs =
-                now + Duration::from_millis(config.process_interval_ms.max(MIN_INTERVAL_MS));
-            col.processes(10)
+        sample.at = at;
+        let procs = (self.panel_open && now >= self.next_procs).then(|| {
+            self.next_procs = now + every(self.config.process_interval_ms);
+            self.sensors.processes(10)
         });
-        let adapters = (now >= next_adapters).then(|| {
-            next_adapters = now + Duration::from_secs(10);
-            col.adapters()
-                .into_iter()
-                .map(|a| a.alias)
-                .collect::<Vec<_>>()
+        let adapters = (now >= self.next_adapters).then(|| {
+            self.next_adapters = now + Duration::from_secs(10);
+            self.sensors.adapters()
         });
+        let net = self.sensors.network();
 
-        let mut s = shared.lock().unwrap();
+        let mut s = self.shared.lock().unwrap();
         s.history.record_sample(&sample);
         if let Some(p) = procs {
             s.processes = p;
@@ -224,9 +291,11 @@ fn run(
         if let Some(a) = adapters {
             s.adapters = a;
         }
-        s.findings = verdict::from_history(&s.history, probe::path_up());
+        s.findings = diagnose(&s.history, &net);
         s.sample_count += 1;
-        drop(s);
-        wake();
+        true
     }
 }
+
+#[cfg(test)]
+mod tests;

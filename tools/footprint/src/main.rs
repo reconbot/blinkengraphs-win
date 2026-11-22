@@ -2,10 +2,7 @@
 //! Runs the engine with default config plus Meter and Strip drawing each Sample, then prints a markdown
 //! report of CPU share and memory. The Panel window is excluded: it only exists while open.
 
-use std::{
-    sync::atomic::Ordering,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -46,7 +43,6 @@ fn main() {
         ));
         drawn += 1;
     }
-    engine.panel_open.store(false, Ordering::Relaxed);
     let wall = start.elapsed().as_secs_f64();
     let cpu = os::cpu_time() - cpu0;
     let (ws, peak_ws, private) = os::memory();

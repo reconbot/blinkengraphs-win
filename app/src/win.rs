@@ -419,13 +419,13 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::Focus);
         self.visible = true;
         self.shown_at = Instant::now();
-        self.engine.panel_open.store(true, Ordering::Relaxed);
+        self.engine.send(Command::PanelOpen(true));
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         self.visible = false;
-        self.engine.panel_open.store(false, Ordering::Relaxed);
+        self.engine.send(Command::PanelOpen(false));
     }
 
     fn toggle(&mut self, ctx: &egui::Context, anchor: Option<Rect>) {
