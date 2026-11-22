@@ -2,7 +2,7 @@
 
 Project memory lives in the repo: decisions `docs/adr/`, plan `docs/PLAN.md`, research `docs/research/`. Record learnings there.
 
-Vocabulary, Verdict rules, test vectors, design tokens and shared defaults live in the spec repo, reconbot/blinkengraphs, checked out at `spec/` as a submodule on a release tag. Rule changes start there; regenerate its `vectors/`, `fixtures/` and `tokens/` with `cargo run -p vectors -- <spec checkout>`. CI regenerates against the submodule and expects no diff; bump the submodule in a PR when the spec releases (spec `docs/sync.md`).
+The spec repo, reconbot/blinkengraphs, authors the vocabulary, rules, vectors, fixtures, tokens, defaults and icon; this repo implements it. It is checked out at `spec/` as a submodule on a release tag. A rule this app needs starts as a spec PR. `cargo test -p conformance` runs every spec vector against this code; bump the submodule in a PR when the spec releases (spec `docs/sync.md`).
 
 Defaults: `config::defaults` embeds `spec/defaults.json` and merges `defaults.override.json` over it (spec `rules/defaults.md`). Override a default there, with the reason in an ADR.
 
