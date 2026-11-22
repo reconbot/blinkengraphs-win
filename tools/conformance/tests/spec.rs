@@ -574,3 +574,18 @@ fn history_buckets() {
         assert_eq!(json!(got), c["expected"], "buckets {}", c["range"]);
     }
 }
+
+#[test]
+fn rtt_whole_ms() {
+    for c in load("vectors/rtt/whole-ms.json")["cases"]
+        .as_array()
+        .unwrap()
+    {
+        let d = std::time::Duration::from_secs_f64(c["measured_ms"].as_f64().unwrap() / 1000.0);
+        assert_eq!(
+            probe::rtt_ms(d) as f64,
+            c["rtt_ms"].as_f64().unwrap(),
+            "{c}"
+        );
+    }
+}

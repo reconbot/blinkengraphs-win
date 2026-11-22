@@ -318,7 +318,10 @@ impl Panel {
                 if let Some(p) = probes.first() {
                     let v = config.probe_view(p);
                     let st = view.history.aggregate(p, v.window_secs, v.aggregate);
-                    let rtt = st.value.map(|r| format!("{r:.0} ms")).unwrap_or("—".into());
+                    let rtt = st
+                        .value
+                        .map(|r| model::rtt_text(r as f64))
+                        .unwrap_or("—".into());
                     let text = match (latency, loss) {
                         (true, true) => format!("{rtt}  {:.0}% loss", st.loss * 100.0),
                         (true, false) => rtt,
@@ -360,11 +363,11 @@ impl Panel {
                 let text = format!(
                     "{p}  {named}{}  {:.0}%{}",
                     sum.value
-                        .map(|r| format!("{r:.1} ms"))
+                        .map(|r| model::rtt_text(r as f64))
                         .unwrap_or("—".into()),
                     sum.loss * 100.0,
                     st.jitter_ms
-                        .map(|j| format!("  ±{j:.1}"))
+                        .map(|j| format!("  ±{j:.0}"))
                         .unwrap_or_default()
                 );
                 dot(ui, theme::probe(p, i), 3.5);
@@ -630,7 +633,16 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
         ui.label(RichText::new("Waiting for replies…").weak());
         return;
     }
-    let ms = |v: Option<f32>| v.map(|v| format!("{v:.1}")).unwrap_or("—".into());
+    let ms = |v: Option<f32>| {
+        v.map(|v| {
+            if v < 0.5 {
+                "<1".into()
+            } else {
+                format!("{v:.0}")
+            }
+        })
+        .unwrap_or("—".into())
+    };
     let cols: [(f32, &str); 7] = [
         (22.0, "#"),
         (0.0, "Host"),

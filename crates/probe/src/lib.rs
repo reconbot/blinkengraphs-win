@@ -4,6 +4,7 @@ pub mod captive;
 mod dns;
 pub mod names;
 mod net;
+pub use net::ms as rtt_ms;
 pub mod public;
 mod resolve;
 #[cfg_attr(not(windows), allow(dead_code))]

@@ -351,3 +351,13 @@ pub fn now() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
+
+/// An RTT or RTT statistic for display: whole milliseconds, and "< 1 ms" for a reply recorded
+/// as 0 (spec `rules/probe-stats.md`).
+pub fn rtt_text(ms: f64) -> String {
+    if ms < 0.5 {
+        "< 1 ms".into()
+    } else {
+        format!("{ms:.0} ms")
+    }
+}

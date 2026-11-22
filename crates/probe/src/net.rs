@@ -88,8 +88,9 @@ fn random_u16() -> u16 {
     RandomState::new().hash_one(Instant::now()) as u16
 }
 
+/// RTTs are recorded in whole milliseconds, `⌊d + 0.5⌋` (spec `rules/probe-stats.md`).
 pub fn ms(d: Duration) -> f32 {
-    d.as_secs_f32() * 1000.0
+    (d.as_secs_f64() * 1000.0 + 0.5).floor() as f32
 }
 
 #[cfg(test)]
