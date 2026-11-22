@@ -79,6 +79,10 @@ jobs:
         run: |
           size=$(stat -c %s target/${{ matrix.target }}/release/blinkengraphs.exe)
           echo "blinkengraphs.exe (${{ matrix.target }}): $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          # A guideline, not a limit: flag it for review, never fail.
+          if [ "$size" -gt 7340032 ]; then
+            echo "::warning title=exe size::blinkengraphs.exe (${{ matrix.target }}) is $size bytes, over the 7 MiB guideline (ADR 0007); say in the PR what the bytes buy"
+          fi
       - if: matrix.target == 'x86_64-pc-windows-msvc'
         name: footprint
         shell: bash
