@@ -1,5 +1,13 @@
 use collect::{AdapterChoice, Collector};
 use model::{ProcessRow, Sample};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 /// What the network looks like to the OS, beyond what Probes measure (spec `rules/verdict.md`
 /// inputs `path_up`, `via_vpn`, `captive_portal`).
@@ -35,14 +43,35 @@ pub trait Sensors: Send {
 pub struct SystemSensors {
     adapter: AdapterChoice,
     collector: Option<Collector>,
+    captive: Arc<AtomicBool>,
 }
 
 impl SystemSensors {
-    pub fn new(adapter: AdapterChoice) -> Self {
+    /// `captive_portal_url` is `defaults.json`'s; it is checked on a thread of its own.
+    pub fn new(adapter: AdapterChoice, captive_portal_url: String) -> Self {
+        let captive = Arc::new(AtomicBool::new(false));
+        let flag = captive.clone();
+        thread::Builder::new()
+            .name("captive portal".into())
+            .spawn(move || watch_captive(&captive_portal_url, &flag))
+            .expect("spawn captive portal check");
         Self {
             collector: Collector::new(adapter.clone()).ok(),
             adapter,
+            captive,
         }
+    }
+}
+
+/// A portal shows up when joining a network and clears when the user signs in, so check
+/// often while one is up and rarely otherwise. No answer counts as no portal, the spec's
+/// default for `captive_portal`.
+fn watch_captive(url: &str, captive: &AtomicBool) {
+    loop {
+        let c =
+            probe::path_up() && probe::captive::check(url, Duration::from_secs(5)).unwrap_or(false);
+        captive.store(c, Ordering::Relaxed);
+        thread::sleep(Duration::from_secs(if c { 15 } else { 60 }));
     }
 }
 
@@ -80,6 +109,7 @@ impl Sensors for SystemSensors {
     fn network(&mut self) -> Network {
         Network {
             path_up: probe::path_up(),
+            captive_portal: self.captive.load(Ordering::Relaxed),
             ..Network::default()
         }
     }

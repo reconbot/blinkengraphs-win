@@ -56,7 +56,8 @@ impl Engine {
         wake: impl Fn() + Send + 'static,
         idle: IdleCheck,
     ) -> Self {
-        let sensors = SystemSensors::new(adapter(&config));
+        let url = config::defaults::get().captive_portal_url;
+        let sensors = SystemSensors::new(adapter(&config), url);
         Self::start_with(config, db, sensors, wake, idle)
     }
 
