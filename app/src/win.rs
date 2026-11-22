@@ -522,6 +522,7 @@ impl App {
             findings: &s.findings,
             processes: &s.processes,
             adapters: &s.adapters,
+            links: &s.links,
             now: model::now(),
             elevated: self.elevated,
             config_error: self.error.as_deref(),

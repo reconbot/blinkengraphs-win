@@ -28,6 +28,8 @@ pub struct Shared {
     pub findings: Vec<Finding>,
     pub processes: Vec<ProcessRow>,
     pub adapters: Vec<String>,
+    /// The Links being measured now.
+    pub links: Vec<model::Link>,
     pub paused: bool,
     /// Bumped on every new Sample so Surfaces redraw once per Sample.
     pub sample_count: u64,
@@ -78,6 +80,7 @@ impl Engine {
             findings: vec![],
             processes: vec![],
             adapters: vec![],
+            links: vec![],
             paused: false,
             sample_count: 0,
         }));
@@ -130,6 +133,7 @@ pub fn groups(c: &Config) -> Vec<ProbeGroup> {
                     interval: ms(interval),
                     probes,
                     traces,
+                    link: None,
                 });
             }
         }
@@ -140,9 +144,40 @@ pub fn groups(c: &Config) -> Vec<ProbeGroup> {
             interval: Duration::from_secs(1),
             probes: vec![c.primary.clone()],
             traces: vec![],
+            link: None,
         });
     }
     gs
+}
+
+/// Each group of `groups` on each Link, or once with the OS choosing when no Links are known.
+pub fn groups_on(c: &Config, links: &[model::Link]) -> Vec<ProbeGroup> {
+    let base = groups(c);
+    if links.is_empty() {
+        return base;
+    }
+    links
+        .iter()
+        .flat_map(|l| {
+            base.iter().map(move |g| ProbeGroup {
+                name: format!("{} on {}", g.name, l.alias),
+                link: Some(l.clone()),
+                ..g.clone()
+            })
+        })
+        .collect()
+}
+
+/// The Followed Adapter's Link: the pinned adapter's, else the one carrying the default route
+/// (spec `rules/verdict.md`, Input).
+pub fn followed(c: &Config, links: &[model::Link]) -> Option<model::LinkId> {
+    let link = match &c.adapter {
+        Adapter::Pinned(alias) => links.iter().find(|l| &l.alias == alias),
+        Adapter::FollowDefaultRoute => None,
+    }
+    .or_else(|| links.iter().find(|l| l.default_route))
+    .or_else(|| links.first());
+    link.map(|l| l.id.clone())
 }
 
 fn adapter(c: &Config) -> AdapterChoice {
@@ -272,12 +307,12 @@ impl<S: Sensors> Monitor<S> {
         match c {
             Command::Reconfigure(c) => {
                 self.sensors.set_adapter(adapter(&c));
-                self.prober.reconfigure(groups(&c));
-                self.shared
-                    .lock()
-                    .unwrap()
-                    .history
-                    .set_archive_days(c.history.archive_days);
+                let mut s = self.shared.lock().unwrap();
+                self.prober.reconfigure(groups_on(&c, &s.links));
+                s.history.set_archive_days(c.history.archive_days);
+                let f = followed(&c, &s.links);
+                s.history.set_followed(f, model::now());
+                drop(s);
                 self.config = *c;
             }
             Command::PanelOpen(open) => self.panel_open = open,
@@ -329,12 +364,19 @@ impl<S: Sensors> Monitor<S> {
         if s.history.cut(r.start, r.end) {
             return;
         }
-        for p in &r.probes {
-            s.history.record_probe(p);
+        s.history.record_round(r.link.as_ref(), &r.probes, &r.hops);
+    }
+
+    /// Takes up the Links up now: on a change, every Probe Group runs on each of them, and
+    /// History follows the Followed Adapter's.
+    fn update_links(&mut self, links: Vec<model::Link>, at: u64) {
+        let mut s = self.shared.lock().unwrap();
+        if links != s.links {
+            self.prober.reconfigure(groups_on(&self.config, &links));
+            s.links = links;
         }
-        for h in &r.hops {
-            s.history.record_hop(h);
-        }
+        let f = followed(&self.config, &s.links);
+        s.history.set_followed(f, at);
     }
 
     /// A suspend Windows never announced, such as a critical one, shows as time asleep that
@@ -392,6 +434,8 @@ impl<S: Sensors> Monitor<S> {
         });
         let adapters = (now >= self.next_adapters).then(|| {
             self.next_adapters = now + Duration::from_secs(10);
+            let links = self.sensors.links();
+            self.update_links(links, at);
             self.sensors.adapters()
         });
         let net = self.sensors.network();

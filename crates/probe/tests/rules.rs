@@ -1,10 +1,10 @@
 //! The Prober's spec rules (`rules/probe-stats.md`, `rules/hop-trace.md`) over a scripted network.
 
-use model::{HopResult, Probe, ProbeResult, Protocol, Target};
+use model::{HopResult, Link, LinkId, LinkKind, Probe, ProbeResult, Protocol, Target};
 use probe::{Echo, Event, Limits, ProbeGroup, Prober, Transport, transport::Hop};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::mpsc::Receiver,
+    sync::{Arc, Mutex, mpsc::Receiver},
     time::Duration,
 };
 
@@ -13,9 +13,29 @@ const V6: IpAddr = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0,
 /// The target in the scripted network is this many hops away.
 const HOPS: u8 = 3;
 
+/// Each send: the Link's NET_LUID it went out on, and where to.
+type Sent = Arc<Mutex<Vec<(Option<u64>, IpAddr)>>>;
+
+#[derive(Default)]
 struct Net {
     v4: bool,
     v6: bool,
+    /// Destinations a Link doesn't route.
+    unrouted: Vec<IpAddr>,
+    sent: Sent,
+}
+
+impl Net {
+    fn up() -> Net {
+        Net {
+            v4: true,
+            v6: true,
+            ..Net::default()
+        }
+    }
+    fn send(&self, via: Option<&Link>, to: IpAddr) {
+        self.sent.lock().unwrap().push((via.map(|l| l.id.luid), to));
+    }
 }
 
 impl Transport for Net {
@@ -28,16 +48,30 @@ impl Transport for Net {
             _ => None,
         }
     }
-    fn tcp(&self, _: SocketAddr, _: Duration) -> Option<Duration> {
+    fn routes(&self, _: &Link, to: IpAddr) -> bool {
+        !self.unrouted.contains(&to)
+    }
+    fn tcp(&self, via: Option<&Link>, to: SocketAddr, _: Duration) -> Option<Duration> {
+        self.send(via, to.ip());
         Some(Duration::from_millis(7))
     }
-    fn udp(&self, _: SocketAddr, _: Duration) -> Option<Duration> {
+    fn udp(&self, via: Option<&Link>, to: SocketAddr, _: Duration) -> Option<Duration> {
+        self.send(via, to.ip());
         None
     }
-    fn dns(&self, _: SocketAddr, _: Duration, _: &str) -> Option<Duration> {
+    fn dns(&self, via: Option<&Link>, to: SocketAddr, _: Duration, _: &str) -> Option<Duration> {
+        self.send(via, to.ip());
         Some(Duration::from_millis(9))
     }
-    fn echo(&self, requests: &[(IpAddr, u8)], _: Duration) -> Option<Vec<Option<Echo>>> {
+    fn echo(
+        &self,
+        via: Option<&Link>,
+        requests: &[(IpAddr, u8)],
+        _: Duration,
+    ) -> Option<Vec<Option<Echo>>> {
+        for (to, _) in requests {
+            self.send(via, *to);
+        }
         Some(
             requests
                 .iter()
@@ -55,7 +89,14 @@ impl Transport for Net {
                 .collect(),
         )
     }
-    fn tcp_trace(&self, _: Ipv4Addr, _: u16, _: u8, _: Duration) -> Option<Vec<Hop>> {
+    fn tcp_trace(
+        &self,
+        _: Option<&Link>,
+        _: Ipv4Addr,
+        _: u16,
+        _: u8,
+        _: Duration,
+    ) -> Option<Vec<Hop>> {
         None
     }
 }
@@ -74,11 +115,21 @@ fn p(protocol: Protocol, target: Target) -> Probe {
 }
 
 fn start(net: Net, probes: Vec<Probe>, traces: Vec<Probe>) -> (Prober, Receiver<Event>) {
+    start_on(net, None, probes, traces)
+}
+
+fn start_on(
+    net: Net,
+    link: Option<Link>,
+    probes: Vec<Probe>,
+    traces: Vec<Probe>,
+) -> (Prober, Receiver<Event>) {
     let group = ProbeGroup {
         name: "test".into(),
         interval: Duration::from_secs(60),
         probes,
         traces,
+        link,
     };
     Prober::start_with(vec![group], limits(), net)
 }
@@ -105,6 +156,7 @@ fn a_target_whose_ip_version_has_no_route_is_absent_not_lost() {
         Net {
             v4: true,
             v6: false,
+            ..Net::default()
         },
         both,
         vec![],
@@ -121,6 +173,7 @@ fn no_path_at_all_sends_nothing() {
         Net {
             v4: false,
             v6: false,
+            ..Net::default()
         },
         vec![p(Protocol::Tcp(443), Target::Addr(V4))],
         vec![],
@@ -132,7 +185,7 @@ fn no_path_at_all_sends_nothing() {
 fn an_unresolved_target_counts_as_lost() {
     let name = Target::Name("nowhere.invalid".into());
     let (_p, rx) = start(
-        Net { v4: true, v6: true },
+        Net::up(),
         vec![
             p(Protocol::Tcp(443), name.clone()),
             p(Protocol::Icmp, name.clone()),
@@ -148,7 +201,7 @@ fn an_unresolved_target_counts_as_lost() {
 fn icmp_probe_and_trace_share_one_batch_and_the_trace_stops_at_the_target() {
     let target = Target::Addr(V4);
     let (_p, rx) = start(
-        Net { v4: true, v6: true },
+        Net::up(),
         vec![p(Protocol::Icmp, target.clone())],
         vec![p(Protocol::Icmp, target)],
     );
@@ -169,6 +222,7 @@ fn a_round_arrives_whole_stamped_with_its_start_and_end() {
         Net {
             v4: true,
             v6: false,
+            ..Net::default()
         },
         vec![icmp, tcp],
         vec![],
@@ -182,4 +236,75 @@ fn a_round_arrives_whole_stamped_with_its_start_and_end() {
     assert!(round.start <= round.end);
     assert_eq!(round.at, round.start.floor() as u64);
     assert!(round.probes.iter().all(|r| r.at == round.at));
+}
+
+fn wifi() -> Link {
+    Link {
+        id: LinkId {
+            luid: 7,
+            gateway: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+        },
+        alias: "Wi-Fi".into(),
+        kind: LinkKind::WiFi,
+        index_v4: 12,
+        index_v6: 12,
+        source_v4: Some(Ipv4Addr::new(192, 168, 1, 20)),
+        source_v6: None,
+        default_route: true,
+    }
+}
+
+fn round(rx: &Receiver<Event>) -> probe::Round {
+    loop {
+        if let Event::Round(r) = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            return r;
+        }
+    }
+}
+
+#[test]
+fn a_link_s_probes_leave_from_it_and_its_gateway_is_its_own() {
+    let net = Net::up();
+    let sent = net.sent.clone();
+    let (_p, rx) = start_on(
+        net,
+        Some(wifi()),
+        vec![
+            p(Protocol::Tcp(443), Target::Addr(V4)),
+            p(Protocol::Icmp, Target::Gateway),
+        ],
+        vec![],
+    );
+    let r = round(&rx);
+    assert_eq!(r.link, Some(wifi().id));
+    assert_eq!(r.probes.len(), 2);
+    let mut sent = sent.lock().unwrap().clone();
+    sent.sort();
+    assert_eq!(
+        sent,
+        [
+            (Some(7), V4),
+            (Some(7), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)))
+        ]
+    );
+}
+
+#[test]
+fn a_target_its_link_does_not_route_is_absent_not_lost() {
+    let net = Net {
+        unrouted: vec![V4],
+        ..Net::up()
+    };
+    let (_p, rx) = start_on(
+        net,
+        Some(wifi()),
+        vec![
+            p(Protocol::Tcp(443), Target::Addr(V4)),
+            p(Protocol::Tcp(443), Target::Addr(V6)),
+        ],
+        vec![],
+    );
+    let r = round(&rx);
+    let to: Vec<&Target> = r.probes.iter().map(|r| &r.probe.target).collect();
+    assert_eq!(to, [&Target::Addr(V6)]);
 }

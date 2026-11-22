@@ -1,4 +1,5 @@
 use crate::trace::Hop;
+use model::{Link, LinkId, LinkKind};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io::ErrorKind,
@@ -15,18 +16,22 @@ use windows_sys::Win32::{
         INVALID_HANDLE_VALUE, NO_ERROR, WAIT_OBJECT_0,
     },
     NetworkManagement::IpHelper::{
-        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST,
-        GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, GetBestRoute2, ICMP_ECHO_REPLY,
-        ICMPV6_ECHO_REPLY_LH, IP_ADAPTER_ADDRESSES_LH, IP_OPTION_INFORMATION, IP_REQ_TIMED_OUT,
-        Icmp6CreateFile, Icmp6ParseReplies, Icmp6SendEcho2, IcmpCloseHandle, IcmpCreateFile,
-        IcmpParseReplies, IcmpSendEcho2, MIB_IPFORWARD_ROW2,
+        GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_FRIENDLY_NAME,
+        GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, GetBestRoute2,
+        ICMP_ECHO_REPLY, ICMPV6_ECHO_REPLY_LH, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211,
+        IF_TYPE_PPP, IF_TYPE_PROP_VIRTUAL, IF_TYPE_TUNNEL, IP_ADAPTER_ADDRESSES_LH,
+        IP_OPTION_INFORMATION, IP_REQ_TIMED_OUT, Icmp6CreateFile, Icmp6ParseReplies,
+        Icmp6SendEcho2, IcmpCloseHandle, IcmpCreateFile, IcmpParseReplies, IcmpSendEcho2Ex,
+        MIB_IPFORWARD_ROW2,
     },
+    NetworkManagement::Ndis::{IfOperStatusUp, NET_LUID_LH},
     Networking::WinSock::{
         AF_INET, AF_INET6, AF_UNSPEC, GetNameInfoW, ICMP_ERROR_INFO, IN_ADDR, IN_ADDR_0, IN6_ADDR,
-        IN6_ADDR_0, IPPROTO_TCP, NI_MAXHOST, NI_NAMEREQD, SIO_TCP_INITIAL_RTO, SOCKADDR,
-        SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET, SOCKET, TCP_FAIL_CONNECT_ON_ICMP_ERROR,
-        TCP_ICMP_ERROR_INFO, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS,
-        WSAIoctl, getsockopt, setsockopt,
+        IN6_ADDR_0, IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPPROTO_TCP, IPV6_UNICAST_IF,
+        NI_MAXHOST, NI_NAMEREQD, SIO_TCP_INITIAL_RTO, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6,
+        SOCKADDR_INET, SOCKET, TCP_FAIL_CONNECT_ON_ICMP_ERROR, TCP_ICMP_ERROR_INFO,
+        TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS, WSAIoctl, getsockopt,
+        setsockopt,
     },
     System::Threading::{CreateEventW, WaitForMultipleObjects},
 };
@@ -103,7 +108,21 @@ impl Icmp {
     /// For IPv6 the TTL is the hop limit.
     /// https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmpsendecho2
     /// https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmp6sendecho2
-    pub fn batch(&self, requests: &[(IpAddr, u8)], timeout: Duration) -> Vec<Option<Echo>> {
+    /// With `via`, echoes leave from its addresses. Under Windows' default strong host model a
+    /// source address confines the route lookup to its interface (research 07 §3; unverified
+    /// through a full-tunnel VPN).
+    pub fn batch(
+        &self,
+        via: Option<&Link>,
+        requests: &[(IpAddr, u8)],
+        timeout: Duration,
+    ) -> Vec<Option<Echo>> {
+        let source_v4 = via
+            .and_then(|l| l.source_v4)
+            .map_or(0, |a| u32::from_ne_bytes(a.octets()));
+        let source_v6 = via
+            .and_then(|l| l.source_v6)
+            .unwrap_or(Ipv6Addr::UNSPECIFIED);
         let timeout_ms = timeout.as_millis().max(1) as u32;
         let mut reqs: Vec<Request> = requests
             .iter()
@@ -126,11 +145,13 @@ impl Icmp {
                 }
                 let rc = match dst {
                     IpAddr::V4(dst) => unsafe {
-                        IcmpSendEcho2(
+                        // Source 0 lets the stack pick, as IcmpSendEcho2 does.
+                        IcmpSendEcho2Ex(
                             self.v4,
                             r.event,
                             None,
                             null(),
+                            source_v4,
                             u32::from_ne_bytes(dst.octets()),
                             PAYLOAD.as_ptr().cast(),
                             PAYLOAD.len() as u16,
@@ -143,7 +164,7 @@ impl Icmp {
                     IpAddr::V6(dst) => {
                         let Some(h) = self.v6 else { return r };
                         // Source :: lets the stack pick the outgoing address.
-                        r.addrs[0] = sockaddr_in6(Ipv6Addr::UNSPECIFIED);
+                        r.addrs[0] = sockaddr_in6(source_v6);
                         r.addrs[1] = sockaddr_in6(dst);
                         unsafe {
                             Icmp6SendEcho2(
@@ -277,12 +298,20 @@ pub enum Connect {
     Lost,
 }
 
-pub fn tcp_connect(addr: SocketAddr, timeout: Duration, ttl: Option<u8>) -> Connect {
+pub fn tcp_connect(
+    via: Option<&Link>,
+    addr: SocketAddr,
+    timeout: Duration,
+    ttl: Option<u8>,
+) -> Connect {
     let Ok(socket) = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
     else {
         return Connect::Lost;
     };
     let raw = socket.as_raw_socket() as SOCKET;
+    if via.is_some_and(|l| !unicast_if(raw, addr.is_ipv6(), l)) {
+        return Connect::Lost;
+    }
     // Windows retransmits the SYN after an RST for ~2 s, which would turn a closed port into a loss.
     // https://learn.microsoft.com/windows/win32/winsock/sio-tcp-initial-rto
     let rto = TCP_INITIAL_RTO_PARAMETERS {
@@ -350,11 +379,22 @@ fn icmp_error_source(raw: SOCKET) -> Option<IpAddr> {
 }
 
 /// Unverified technique (ADR 0006); a hop whose ICMP error carries no source reports `addr: None`.
-pub fn tcp_trace(ip: Ipv4Addr, port: u16, max_ttl: u8, timeout: Duration) -> Vec<Hop> {
+pub fn tcp_trace(
+    via: Option<&Link>,
+    ip: Ipv4Addr,
+    port: u16,
+    max_ttl: u8,
+    timeout: Duration,
+) -> Vec<Hop> {
     let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
     thread::scope(|s| {
         let handles: Vec<_> = (1..=max_ttl)
-            .map(|ttl| (ttl, s.spawn(move || tcp_connect(addr, timeout, Some(ttl)))))
+            .map(|ttl| {
+                (
+                    ttl,
+                    s.spawn(move || tcp_connect(via, addr, timeout, Some(ttl))),
+                )
+            })
             .collect();
         handles
             .into_iter()
@@ -387,6 +427,11 @@ fn sockaddr_inet(a: &SOCKADDR_INET) -> Option<IpAddr> {
 
 /// The route the stack would use to reach `to`, if any.
 pub(crate) fn route_to(to: IpAddr) -> Option<MIB_IPFORWARD_ROW2> {
+    route_via(None, to)
+}
+
+/// The route to `to` through the interface `luid`, or through any when `None`.
+fn route_via(luid: Option<u64>, to: IpAddr) -> Option<MIB_IPFORWARD_ROW2> {
     let mut dest = SOCKADDR_INET::default();
     match to {
         IpAddr::V4(a) => {
@@ -404,8 +449,145 @@ pub(crate) fn route_to(to: IpAddr) -> Option<MIB_IPFORWARD_ROW2> {
     }
     let mut row: MIB_IPFORWARD_ROW2 = unsafe { zeroed() };
     let mut source = SOCKADDR_INET::default();
-    let rc = unsafe { GetBestRoute2(null(), 0, null(), &dest, 0, &mut row, &mut source) };
+    let luid = luid.map(|v| NET_LUID_LH { Value: v });
+    let luid_ptr = luid.as_ref().map_or(null(), |l| l as *const NET_LUID_LH);
+    let rc = unsafe { GetBestRoute2(luid_ptr, 0, null(), &dest, 0, &mut row, &mut source) };
     (rc == NO_ERROR).then_some(row)
+}
+
+/// Whether `link` routes `to`: the best route constrained to its interface exists and leaves
+/// through it. Unverified whether GetBestRoute2 errs or answers with another interface when
+/// the one asked for has no route (research 07 §4), so the interface is checked as well.
+pub(crate) fn routes(link: &Link, to: IpAddr) -> bool {
+    route_via(Some(link.id.luid), to)
+        .is_some_and(|r| unsafe { r.InterfaceLuid.Value } == link.id.luid)
+}
+
+/// Sends a socket's traffic out `link`'s interface. IPv4 takes the index in network byte
+/// order, IPv6 in host order.
+/// https://learn.microsoft.com/windows/win32/winsock/ipproto-ip-socket-options
+pub(crate) fn unicast_if(raw: SOCKET, v6: bool, link: &Link) -> bool {
+    let (level, name, index) = if v6 {
+        (IPPROTO_IPV6, IPV6_UNICAST_IF, link.index_v6)
+    } else {
+        (IPPROTO_IP, IP_UNICAST_IF, link.index_v4.to_be())
+    };
+    if index == 0 {
+        return false;
+    }
+    let rc = unsafe { setsockopt(raw, level, name, (&index as *const u32).cast(), 4) };
+    rc == 0
+}
+
+/// Every adapter that is up and can reach beyond itself: it has a Gateway, or it carries a
+/// default route on-link, as a VPN may.
+/// https://learn.microsoft.com/windows/win32/api/iphlpapi/nf-iphlpapi-getadaptersaddresses
+pub fn links() -> Vec<Link> {
+    let default = default_route().map(|r| unsafe { r.InterfaceLuid.Value });
+    let default_v6 =
+        route_to("2606:4700:4700::1111".parse().unwrap()).map(|r| unsafe { r.InterfaceLuid.Value });
+    let flags = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+    let Some(buf) = adapters(flags) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    let mut adapter = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while let Some(a) = unsafe { adapter.as_ref() } {
+        adapter = a.Next;
+        if a.OperStatus != IfOperStatusUp {
+            continue;
+        }
+        let luid = unsafe { a.Luid.Value };
+        let mut gateways = Vec::new();
+        let mut g = a.FirstGatewayAddress;
+        while let Some(e) = unsafe { g.as_ref() } {
+            gateways.extend(socket_ip(e.Address.lpSockaddr));
+            g = e.Next;
+        }
+        let mut unicast = Vec::new();
+        let mut u = a.FirstUnicastAddress;
+        while let Some(e) = unsafe { u.as_ref() } {
+            unicast.extend(socket_ip(e.Address.lpSockaddr));
+            u = e.Next;
+        }
+        let default_route = default == Some(luid) || default_v6 == Some(luid);
+        let gateway = gateways
+            .iter()
+            .find(|g| g.is_ipv4())
+            .or_else(|| gateways.first())
+            .copied();
+        if gateway.is_none() && !default_route {
+            continue;
+        }
+        let kind = match a.IfType {
+            IF_TYPE_ETHERNET_CSMACD => LinkKind::Ethernet,
+            IF_TYPE_IEEE80211 => LinkKind::WiFi,
+            // Wintun and WireGuard adapters report IF_TYPE_PROP_VIRTUAL (research 07 §4).
+            IF_TYPE_PPP | IF_TYPE_PROP_VIRTUAL | IF_TYPE_TUNNEL => LinkKind::Vpn,
+            _ => LinkKind::Other,
+        };
+        out.push(Link {
+            id: LinkId { luid, gateway },
+            alias: wide(a.FriendlyName),
+            kind,
+            index_v4: unsafe { a.Anonymous1.Anonymous.IfIndex },
+            index_v6: a.Ipv6IfIndex,
+            source_v4: unicast.iter().find_map(|u| match u {
+                IpAddr::V4(v) if !v.is_link_local() => Some(*v),
+                _ => None,
+            }),
+            source_v6: unicast.iter().find_map(|u| match u {
+                IpAddr::V6(v) if (v.segments()[0] & 0xffc0) != 0xfe80 => Some(*v),
+                _ => None,
+            }),
+            default_route,
+        });
+    }
+    out
+}
+
+/// The adapter list, retried while it grows between the sizing call and the real one.
+fn adapters(flags: u32) -> Option<Vec<u64>> {
+    let mut size: u32 = 16 * 1024;
+    for _ in 0..4 {
+        let mut buf: Vec<u64> = vec![0; (size as usize).div_ceil(8)];
+        let rc = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                flags,
+                null(),
+                buf.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        match rc {
+            NO_ERROR => return Some(buf),
+            ERROR_BUFFER_OVERFLOW => continue,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn socket_ip(sa: *const SOCKADDR) -> Option<IpAddr> {
+    let family = unsafe { sa.as_ref() }?.sa_family;
+    if family == AF_INET {
+        let sin = unsafe { &*(sa as *const SOCKADDR_IN) };
+        Some(Ipv4Addr::from(unsafe { sin.sin_addr.S_un.S_addr }.to_ne_bytes()).into())
+    } else if family == AF_INET6 {
+        let sin6 = unsafe { &*(sa as *const SOCKADDR_IN6) };
+        Some(Ipv6Addr::from(unsafe { sin6.sin6_addr.u.Byte }).into())
+    } else {
+        None
+    }
+}
+
+fn wide(p: windows_sys::core::PWSTR) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let len = (0..).take_while(|&i| unsafe { *p.add(i) } != 0).count();
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) })
 }
 
 pub(crate) fn default_route() -> Option<MIB_IPFORWARD_ROW2> {

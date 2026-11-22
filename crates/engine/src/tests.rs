@@ -8,6 +8,7 @@ struct Fake {
     net: Network,
     process_reads: Arc<AtomicUsize>,
     slept: Arc<Mutex<f64>>,
+    links: Arc<Mutex<Vec<model::Link>>>,
 }
 
 impl Sensors for Fake {
@@ -34,6 +35,9 @@ impl Sensors for Fake {
     fn slept_s(&mut self) -> f64 {
         *self.slept.lock().unwrap()
     }
+    fn links(&mut self) -> Vec<model::Link> {
+        self.links.lock().unwrap().clone()
+    }
 }
 
 const AT: u64 = 1_800_000_000;
@@ -51,6 +55,7 @@ fn monitor_with(fake: Fake, idle: IdleCheck) -> Monitor<Fake> {
         findings: vec![],
         processes: vec![],
         adapters: vec![],
+        links: vec![],
         paused: false,
         sample_count: 0,
     }));
@@ -149,6 +154,7 @@ fn round(start: f64, end: f64) -> probe::Round {
         at,
         start,
         end,
+        link: None,
         probes: vec![model::ProbeResult {
             probe: Config::default().primary,
             at,
@@ -201,7 +207,7 @@ fn a_round_a_pause_cut_records_nothing() {
     m.command(Command::Resume(WALL + 10.0));
     m.round(round(WALL + 20.1, WALL + 20.2));
     let h = &m.shared.lock().unwrap().history;
-    let got = h.recent(&history::Key::Probe(Config::default().primary), 10);
+    let got = h.recent(&history::Key::Probe(None, Config::default().primary), 10);
     assert_eq!(got, [Some(12.0)]);
 }
 
@@ -256,4 +262,51 @@ fn a_resume_with_no_suspend_before_it_still_finds_the_sleep() {
     let p = pauses(&m);
     assert_eq!(p.len(), 1);
     assert_eq!(p[0].begin, WALL);
+}
+
+fn link(luid: u64, alias: &str, default_route: bool) -> model::Link {
+    model::Link {
+        id: model::LinkId {
+            luid,
+            gateway: Some("192.168.1.1".parse().unwrap()),
+        },
+        alias: alias.into(),
+        kind: model::LinkKind::Ethernet,
+        index_v4: luid as u32,
+        index_v6: 0,
+        source_v4: None,
+        source_v6: None,
+        default_route,
+    }
+}
+
+#[test]
+fn every_probe_group_runs_once_per_link() {
+    let links = [link(1, "Ethernet", true), link(2, "Wi-Fi", false)];
+    let gs = groups_on(&Config::default(), &links);
+    let one = groups(&Config::default()).len();
+    assert_eq!(gs.len(), 2 * one);
+    assert!(gs.iter().all(|g| g.link.is_some()));
+    assert_eq!(groups_on(&Config::default(), &[]).len(), one);
+}
+
+#[test]
+fn the_followed_link_is_the_pinned_adapter_s_else_the_default_route_s() {
+    let links = [link(1, "Ethernet", false), link(2, "Wi-Fi", true)];
+    let mut c = Config::default();
+    assert_eq!(followed(&c, &links), Some(links[1].id.clone()));
+    c.adapter = config::Adapter::Pinned("Ethernet".into());
+    assert_eq!(followed(&c, &links), Some(links[0].id.clone()));
+    assert_eq!(followed(&c, &[]), None);
+}
+
+#[test]
+fn links_reach_the_panel_and_history_follows_one() {
+    let fake = Fake::default();
+    *fake.links.lock().unwrap() = vec![link(1, "Ethernet", true)];
+    let mut m = monitor(fake, false);
+    m.tick(Instant::now(), WALL);
+    let s = m.shared.lock().unwrap();
+    assert_eq!(s.links.len(), 1);
+    assert_eq!(s.history.followed(), Some(&s.links[0].id));
 }
