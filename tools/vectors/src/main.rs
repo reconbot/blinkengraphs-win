@@ -179,6 +179,37 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
             path_up: true,
         },
     ));
+    let dual = |v4_loss: f32, v6_loss: f32| {
+        let mut ps: Vec<_> = healthy()
+            .into_iter()
+            .map(|(p, s)| {
+                let v4 = matches!(p.target, Target::Addr(a) if a.is_ipv4());
+                if v4 && p.protocol != Protocol::Dns && v4_loss > 0.0 {
+                    (p, st(v4_loss, 0.0, s.baseline_ms.unwrap()))
+                } else {
+                    (p, s)
+                }
+            })
+            .collect();
+        ps.push((
+            p(Protocol::Icmp, "2606:4700:4700::1111"),
+            st(v6_loss, 13.0, 13.0),
+        ));
+        ps.push((
+            p(Protocol::Tcp(443), "2606:4700:4700::1111"),
+            st(v6_loss, 14.0, 14.0),
+        ));
+        ps.push((p(Protocol::Icmp, "2620:fe::fe"), st(v6_loss, 15.0, 15.0)));
+        Case {
+            sample: None,
+            probes: ps,
+            upload_peak_bps: 5e6,
+            path_up: true,
+        }
+    };
+    cases.push(("dual-stack-clear", dual(0.0, 0.0)));
+    cases.push(("ipv6-broken", dual(0.0, 1.0)));
+    cases.push(("ipv4-broken", dual(1.0, 0.0)));
     cases.push((
         "offline",
         Case {

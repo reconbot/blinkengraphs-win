@@ -99,7 +99,7 @@ fn network(input: &Input) -> Vec<Finding> {
         .filter(|p| p.0.target == Target::Gateway)
         .filter(reach)
         .collect();
-    let internet: Vec<_> = input
+    let mut internet: Vec<_> = input
         .probes
         .iter()
         .filter(|p| {
@@ -118,7 +118,7 @@ fn network(input: &Input) -> Vec<Finding> {
     let worst = |ps: &[&(Probe, ProbeStat)]| ps.iter().map(|p| p.1.loss).fold(0.0f32, f32::max);
     let best = |ps: &[&(Probe, ProbeStat)]| ps.iter().map(|p| p.1.loss).fold(1.0f32, f32::min);
     let gw_loss = worst(&gateway);
-    let net_best = best(&internet);
+    let mut net_best = best(&internet);
 
     if !gateway.is_empty() && gw_loss >= LOSS_DOWN && net_best >= LOSS_DOWN {
         out.push(crit(
@@ -132,6 +132,34 @@ fn network(input: &Input) -> Vec<Finding> {
             FaultDomain::Lan,
             format!("Local network unstable: gateway losing {}", pct(gw_loss)),
         ));
+    }
+
+    // One address family down while the other works: say so, then judge only the working one,
+    // so a broken IPv6 path never reads as a remote host's problem.
+    let family = |v6: bool| -> Vec<_> {
+        internet
+            .iter()
+            .copied()
+            .filter(|p| matches!(p.0.target, Target::Addr(a) if a.is_ipv6() == v6))
+            .collect()
+    };
+    let (v4, v6) = (family(false), family(true));
+    let works = |ps: &[&(Probe, ProbeStat)]| ps.iter().any(|p| p.1.loss < LOSS_WARN);
+    if !v4.is_empty() && !v6.is_empty() {
+        if best(&v6) >= LOSS_DOWN && works(&v4) {
+            out.push(warn(
+                FaultDomain::Isp,
+                "IPv6 broken; IPv4 works: ISP or router IPv6 problem".into(),
+            ));
+            internet = v4;
+        } else if best(&v4) >= LOSS_DOWN && works(&v6) {
+            out.push(crit(
+                FaultDomain::Isp,
+                "IPv4 broken; IPv6 works: ISP or router IPv4 problem".into(),
+            ));
+            internet = v6;
+        }
+        net_best = best(&internet);
     }
 
     if !internet.is_empty() {
@@ -461,6 +489,55 @@ mod tests {
         assert_eq!(got[0].domain, FaultDomain::Offline);
         assert_eq!(got[0].severity, Severity::Crit);
         assert_eq!(got[0].headline, "No network connection");
+    }
+
+    fn dual() -> Vec<(Probe, ProbeStat)> {
+        let mut ps = healthy();
+        ps.push((
+            p(Protocol::Icmp, "2606:4700:4700::1111"),
+            st(0.0, 13.0, 13.0),
+        ));
+        ps.push((
+            p(Protocol::Tcp(443), "2606:4700:4700::1111"),
+            st(0.0, 14.0, 14.0),
+        ));
+        ps
+    }
+
+    #[test]
+    fn dual_stack_healthy_is_clear() {
+        assert_eq!(run(&dual(), None)[0].domain, FaultDomain::Clear);
+    }
+
+    #[test]
+    fn broken_ipv6_is_named_not_blamed_on_the_remote() {
+        let mut ps = dual();
+        for i in ps.len() - 2..ps.len() {
+            ps[i].1 = lost();
+        }
+        let got = run(&ps, None);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            got[0].headline,
+            "IPv6 broken; IPv4 works: ISP or router IPv6 problem"
+        );
+        assert_eq!(got[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn broken_ipv4_is_crit() {
+        let mut ps = dual();
+        for (pr, st) in ps.iter_mut() {
+            if matches!(pr.target, Target::Addr(a) if a.is_ipv4()) && pr.protocol != Protocol::Dns {
+                *st = lost();
+            }
+        }
+        let got = run(&ps, None);
+        assert_eq!(
+            got[0].headline,
+            "IPv4 broken; IPv6 works: ISP or router IPv4 problem"
+        );
+        assert_eq!(got[0].severity, Severity::Crit);
     }
 
     fn lost() -> ProbeStat {

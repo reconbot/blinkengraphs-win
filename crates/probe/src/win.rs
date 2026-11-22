@@ -17,14 +17,16 @@ use windows_sys::Win32::{
     NetworkManagement::IpHelper::{
         GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST,
         GAA_FLAG_SKIP_UNICAST, GetAdaptersAddresses, GetBestRoute2, ICMP_ECHO_REPLY,
-        IP_ADAPTER_ADDRESSES_LH, IP_OPTION_INFORMATION, IP_REQ_TIMED_OUT, IcmpCloseHandle,
-        IcmpCreateFile, IcmpParseReplies, IcmpSendEcho2, MIB_IPFORWARD_ROW2,
+        ICMPV6_ECHO_REPLY_LH, IP_ADAPTER_ADDRESSES_LH, IP_OPTION_INFORMATION, IP_REQ_TIMED_OUT,
+        Icmp6CreateFile, Icmp6ParseReplies, Icmp6SendEcho2, IcmpCloseHandle, IcmpCreateFile,
+        IcmpParseReplies, IcmpSendEcho2, MIB_IPFORWARD_ROW2,
     },
     Networking::WinSock::{
-        AF_INET, AF_INET6, AF_UNSPEC, ICMP_ERROR_INFO, IN_ADDR, IN_ADDR_0, IPPROTO_TCP,
-        SIO_TCP_INITIAL_RTO, SOCKADDR_IN, SOCKADDR_INET, SOCKET, TCP_FAIL_CONNECT_ON_ICMP_ERROR,
-        TCP_ICMP_ERROR_INFO, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS,
-        WSAIoctl, getsockopt, setsockopt,
+        AF_INET, AF_INET6, AF_UNSPEC, ICMP_ERROR_INFO, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0,
+        IPPROTO_TCP, SIO_TCP_INITIAL_RTO, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET, SOCKET,
+        TCP_FAIL_CONNECT_ON_ICMP_ERROR, TCP_ICMP_ERROR_INFO,
+        TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS, WSAIoctl, getsockopt,
+        setsockopt,
     },
     System::Threading::{CreateEventW, WaitForMultipleObjects},
 };
@@ -38,25 +40,49 @@ const MAXIMUM_WAIT_OBJECTS: usize = 64;
 const GRACE: Duration = Duration::from_millis(250);
 
 pub struct Echo {
-    pub from: Ipv4Addr,
+    pub from: IpAddr,
     pub status: u32,
     pub rtt: Duration,
 }
 
-pub struct Icmp(HANDLE);
+/// ICMP handles for IPv4 and, when the IPv6 stack is present, IPv6.
+pub struct Icmp {
+    v4: HANDLE,
+    v6: Option<HANDLE>,
+}
 
-// The ICMP handle is a kernel object handle, usable from any thread.
+// The ICMP handles are kernel object handles, usable from any thread.
 unsafe impl Send for Icmp {}
 
 impl Drop for Icmp {
     fn drop(&mut self) {
-        unsafe { IcmpCloseHandle(self.0) };
+        unsafe { IcmpCloseHandle(self.v4) };
+        if let Some(h) = self.v6 {
+            unsafe { IcmpCloseHandle(h) };
+        }
+    }
+}
+
+fn valid(h: HANDLE) -> Option<HANDLE> {
+    (h != INVALID_HANDLE_VALUE && !h.is_null()).then_some(h)
+}
+
+fn sockaddr_in6(ip: Ipv6Addr) -> SOCKADDR_IN6 {
+    SOCKADDR_IN6 {
+        sin6_family: AF_INET6,
+        sin6_addr: IN6_ADDR {
+            u: IN6_ADDR_0 { Byte: ip.octets() },
+        },
+        ..Default::default()
     }
 }
 
 struct Request {
+    v6: bool,
     event: HANDLE,
     options: Box<IP_OPTION_INFORMATION>,
+    // Icmp6SendEcho2 may read these after returning ERROR_IO_PENDING, like `options`.
+    addrs: Box<[SOCKADDR_IN6; 2]>,
     reply: Box<[u64; REPLY_WORDS]>,
     sent: Instant,
     done: Option<Instant>,
@@ -65,18 +91,24 @@ struct Request {
 
 impl Icmp {
     pub fn new() -> Option<Icmp> {
-        let h = unsafe { IcmpCreateFile() };
-        (h != INVALID_HANDLE_VALUE && !h.is_null()).then_some(Icmp(h))
+        Some(Icmp {
+            v4: valid(unsafe { IcmpCreateFile() })?,
+            v6: valid(unsafe { Icmp6CreateFile() }),
+        })
     }
 
     /// Sends every `(destination, ttl)` echo at once and waits up to `timeout` for all of them.
+    /// For IPv6 the TTL is the hop limit.
     /// https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmpsendecho2
-    pub fn batch(&self, requests: &[(Ipv4Addr, u8)], timeout: Duration) -> Vec<Option<Echo>> {
+    /// https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmp6sendecho2
+    pub fn batch(&self, requests: &[(IpAddr, u8)], timeout: Duration) -> Vec<Option<Echo>> {
         let timeout_ms = timeout.as_millis().max(1) as u32;
         let mut reqs: Vec<Request> = requests
             .iter()
             .map(|&(dst, ttl)| {
                 let mut r = Request {
+                    v6: dst.is_ipv6(),
+                    addrs: Box::new([SOCKADDR_IN6::default(); 2]),
                     event: unsafe { CreateEventW(null(), 1, 0, null()) },
                     options: Box::new(IP_OPTION_INFORMATION {
                         Ttl: ttl,
@@ -90,20 +122,44 @@ impl Icmp {
                 if r.event.is_null() {
                     return r;
                 }
-                let rc = unsafe {
-                    IcmpSendEcho2(
-                        self.0,
-                        r.event,
-                        None,
-                        null(),
-                        u32::from_ne_bytes(dst.octets()),
-                        PAYLOAD.as_ptr().cast(),
-                        PAYLOAD.len() as u16,
-                        &*r.options,
-                        r.reply.as_mut_ptr().cast(),
-                        size_of::<[u64; REPLY_WORDS]>() as u32,
-                        timeout_ms,
-                    )
+                let rc = match dst {
+                    IpAddr::V4(dst) => unsafe {
+                        IcmpSendEcho2(
+                            self.v4,
+                            r.event,
+                            None,
+                            null(),
+                            u32::from_ne_bytes(dst.octets()),
+                            PAYLOAD.as_ptr().cast(),
+                            PAYLOAD.len() as u16,
+                            &*r.options,
+                            r.reply.as_mut_ptr().cast(),
+                            size_of::<[u64; REPLY_WORDS]>() as u32,
+                            timeout_ms,
+                        )
+                    },
+                    IpAddr::V6(dst) => {
+                        let Some(h) = self.v6 else { return r };
+                        // Source :: lets the stack pick the outgoing address.
+                        r.addrs[0] = sockaddr_in6(Ipv6Addr::UNSPECIFIED);
+                        r.addrs[1] = sockaddr_in6(dst);
+                        unsafe {
+                            Icmp6SendEcho2(
+                                h,
+                                r.event,
+                                None,
+                                null(),
+                                &r.addrs[0],
+                                &r.addrs[1],
+                                PAYLOAD.as_ptr().cast(),
+                                PAYLOAD.len() as u16,
+                                &*r.options,
+                                r.reply.as_mut_ptr().cast(),
+                                size_of::<[u64; REPLY_WORDS]>() as u32,
+                                timeout_ms,
+                            )
+                        }
+                    }
                 };
                 if rc != 0 {
                     r.done = Some(Instant::now());
@@ -150,6 +206,7 @@ impl Icmp {
                     // The driver may still write into these buffers; leaking is the only safe option.
                     Box::leak(r.reply);
                     Box::leak(r.options);
+                    Box::leak(r.addrs);
                     return None;
                 }
                 parse(r)
@@ -160,19 +217,42 @@ impl Icmp {
 
 fn parse(mut r: Request) -> Option<Echo> {
     let done = r.done?;
-    let n = unsafe {
-        IcmpParseReplies(
-            r.reply.as_mut_ptr().cast(),
-            size_of::<[u64; REPLY_WORDS]>() as u32,
+    let size = size_of::<[u64; REPLY_WORDS]>() as u32;
+    let (n, from, status, coarse_ms) = if r.v6 {
+        let n = unsafe { Icmp6ParseReplies(r.reply.as_mut_ptr().cast(), size) };
+        // The address struct is packed; read the reply unaligned.
+        let reply: ICMPV6_ECHO_REPLY_LH = unsafe {
+            r.reply
+                .as_ptr()
+                .cast::<ICMPV6_ECHO_REPLY_LH>()
+                .read_unaligned()
+        };
+        let words = reply.Address.sin6_addr;
+        let mut bytes = [0u8; 16];
+        for (i, w) in words.iter().enumerate() {
+            bytes[2 * i..2 * i + 2].copy_from_slice(&w.to_ne_bytes());
+        }
+        let from = Ipv6Addr::from(bytes);
+        let addr_zero = from.is_unspecified();
+        (
+            n,
+            (!addr_zero).then_some(IpAddr::V6(from)),
+            reply.Status,
+            reply.RoundTripTime,
         )
+    } else {
+        let n = unsafe { IcmpParseReplies(r.reply.as_mut_ptr().cast(), size) };
+        let reply: ICMP_ECHO_REPLY = unsafe { r.reply.as_ptr().cast::<ICMP_ECHO_REPLY>().read() };
+        let from =
+            (reply.Address != 0).then(|| IpAddr::V4(Ipv4Addr::from(reply.Address.to_ne_bytes())));
+        (n, from, reply.Status, reply.RoundTripTime)
     };
-    let reply: ICMP_ECHO_REPLY = unsafe { r.reply.as_ptr().cast::<ICMP_ECHO_REPLY>().read() };
-    // IcmpParseReplies returns 0 for error replies such as TTL expired, yet still fills in Status and Address.
-    if n == 0 && (reply.Status == 0 || reply.Status == IP_REQ_TIMED_OUT || reply.Address == 0) {
+    // The parse functions return 0 for error replies such as TTL expired, yet still fill in Status and Address.
+    if n == 0 && (status == 0 || status == IP_REQ_TIMED_OUT || from.is_none()) {
         return None;
     }
     let measured = done.duration_since(r.sent);
-    let coarse = Duration::from_millis(reply.RoundTripTime.into());
+    let coarse = Duration::from_millis(coarse_ms.into());
     // A late wake-up (another reply was being handled) inflates `measured`; RoundTripTime is then closer.
     let rtt = if measured <= coarse + Duration::from_millis(1) {
         measured
@@ -180,8 +260,8 @@ fn parse(mut r: Request) -> Option<Echo> {
         coarse
     };
     Some(Echo {
-        from: Ipv4Addr::from(reply.Address.to_ne_bytes()),
-        status: reply.Status,
+        from: from?,
+        status,
         rtt,
     })
 }
@@ -303,21 +383,41 @@ fn sockaddr_inet(a: &SOCKADDR_INET) -> Option<IpAddr> {
     }
 }
 
-pub(crate) fn default_route() -> Option<MIB_IPFORWARD_ROW2> {
+/// The route the stack would use to reach `to`, if any.
+pub(crate) fn route_to(to: IpAddr) -> Option<MIB_IPFORWARD_ROW2> {
     let mut dest = SOCKADDR_INET::default();
-    dest.Ipv4 = SOCKADDR_IN {
-        sin_family: AF_INET,
-        sin_addr: IN_ADDR {
-            S_un: IN_ADDR_0 {
-                S_addr: u32::from_ne_bytes([1, 1, 1, 1]),
-            },
-        },
-        ..Default::default()
-    };
+    match to {
+        IpAddr::V4(a) => {
+            dest.Ipv4 = SOCKADDR_IN {
+                sin_family: AF_INET,
+                sin_addr: IN_ADDR {
+                    S_un: IN_ADDR_0 {
+                        S_addr: u32::from_ne_bytes(a.octets()),
+                    },
+                },
+                ..Default::default()
+            }
+        }
+        IpAddr::V6(a) => dest.Ipv6 = sockaddr_in6(a),
+    }
     let mut row: MIB_IPFORWARD_ROW2 = unsafe { zeroed() };
     let mut source = SOCKADDR_INET::default();
     let rc = unsafe { GetBestRoute2(null(), 0, null(), &dest, 0, &mut row, &mut source) };
     (rc == NO_ERROR).then_some(row)
+}
+
+pub(crate) fn default_route() -> Option<MIB_IPFORWARD_ROW2> {
+    route_to(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)))
+}
+
+/// Whether the stack has a route for this IP version, i.e. the path can reach its Targets.
+pub(crate) fn family_up(v6: bool) -> bool {
+    let probe: IpAddr = if v6 {
+        "2606:4700:4700::1111".parse().unwrap()
+    } else {
+        Ipv4Addr::new(1, 1, 1, 1).into()
+    };
+    route_to(probe).is_some()
 }
 
 /// https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-getbestroute2

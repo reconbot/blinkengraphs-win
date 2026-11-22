@@ -10,13 +10,22 @@ pub use trace::{FULL_SWEEP_EVERY, MAX_TTL};
 #[cfg(windows)]
 mod win;
 
-/// Whether the OS has a default route. Without one there is no network path: Probes pause
-/// and the Verdict reports Offline (spec `rules/verdict.md`).
-pub fn path_up() -> bool {
+/// Whether the OS has a route for this IP version. A Probe to a Target of a version without
+/// one is not sent (spec `rules/probe-stats.md`).
+pub fn family_up(v6: bool) -> bool {
     #[cfg(windows)]
-    return win::default_route().is_some();
+    return win::family_up(v6);
     #[cfg(not(windows))]
-    true
+    {
+        let _ = v6;
+        true
+    }
+}
+
+/// Whether any network path exists. Without one, Probes pause and the Verdict reports Offline
+/// (spec `rules/verdict.md`).
+pub fn path_up() -> bool {
+    family_up(false) || family_up(true)
 }
 
 use model::{HopResult, Probe, ProbeResult, Protocol, Target};
@@ -204,12 +213,19 @@ impl Ticker {
             return;
         }
         let at = model::now();
+        let (v4_up, v6_up) = (family_up(false), family_up(true));
         let mut addrs: HashMap<&Target, Option<IpAddr>> = HashMap::new();
         for p in self.group.probes.iter().chain(&self.group.traces) {
             if !addrs.contains_key(&p.target) {
                 addrs.insert(&p.target, shared.resolve(&p.target));
             }
         }
+        // A Target whose IP version has no route is skipped: absent, not lost.
+        let reachable = |t: &Target| match addrs[t] {
+            Some(IpAddr::V4(_)) => v4_up,
+            Some(IpAddr::V6(_)) => v6_up,
+            None => true,
+        };
         let emit_probe = |probe: &Probe, rtt: Option<Duration>| {
             let result = ProbeResult {
                 probe: probe.clone(),
@@ -241,6 +257,9 @@ impl Ticker {
 
         thread::scope(|s| {
             for probe in &self.group.probes {
+                if !reachable(&probe.target) {
+                    continue;
+                }
                 let addr = addrs[&probe.target];
                 let port = match probe.protocol {
                     Protocol::Tcp(port) | Protocol::Udp(port) => port,
@@ -262,7 +281,7 @@ impl Ticker {
             }
 
             #[cfg(windows)]
-            for (trace, path) in tcp_paths {
+            for (trace, path) in tcp_paths.into_iter().filter(|(t, _)| reachable(&t.target)) {
                 let Protocol::Tcp(port) = trace.protocol else {
                     continue;
                 };
@@ -282,9 +301,20 @@ impl Ticker {
 
             #[cfg(windows)]
             if let Some(icmp) = &self.icmp {
+                let probes: Vec<Probe> = self
+                    .group
+                    .probes
+                    .iter()
+                    .filter(|p| reachable(&p.target))
+                    .cloned()
+                    .collect();
+                let icmp_paths: Vec<_> = icmp_paths
+                    .into_iter()
+                    .filter(|(t, _)| reachable(&t.target))
+                    .collect();
                 icmp_tick(
                     icmp,
-                    &self.group.probes,
+                    &probes,
                     icmp_paths,
                     &addrs,
                     timeout,
@@ -308,24 +338,21 @@ fn icmp_tick(
     emit_probe: &impl Fn(&Probe, Option<Duration>),
     emit_hops: &impl Fn(&Probe, Vec<Hop>),
 ) {
-    use std::net::Ipv4Addr;
-
     enum Tag {
         Probe(usize),
         Hop(usize, u8),
     }
-    let mut requests: Vec<(Ipv4Addr, u8)> = Vec::new();
+    let mut requests: Vec<(IpAddr, u8)> = Vec::new();
     let mut tags = Vec::new();
     for (i, probe) in probes.iter().enumerate() {
         if probe.protocol != Protocol::Icmp {
             continue;
         }
         match addrs[&probe.target] {
-            Some(IpAddr::V4(ip)) => {
+            Some(ip) => {
                 requests.push((ip, 128));
                 tags.push(Tag::Probe(i));
             }
-            Some(IpAddr::V6(_)) => {}
             None => emit_probe(probe, None),
         }
     }
@@ -334,7 +361,7 @@ fn icmp_tick(
     for (i, (trace, path)) in traces.iter().enumerate() {
         let max = path.max_ttl(now);
         swept.push(max);
-        if let Some(IpAddr::V4(ip)) = addrs[&trace.target] {
+        if let Some(ip) = addrs[&trace.target] {
             for ttl in 1..=max {
                 requests.push((ip, ttl));
                 tags.push(Tag::Hop(i, ttl));
@@ -355,7 +382,7 @@ fn icmp_tick(
             ),
             Tag::Hop(i, ttl) => hops[i].push(Hop {
                 ttl,
-                addr: reply.as_ref().map(|r| r.from.into()),
+                addr: reply.as_ref().map(|r| r.from),
                 rtt_ms: reply.as_ref().map(|r| net::ms(r.rtt)),
                 reached: reply.is_some_and(|r| r.status == win::IP_SUCCESS),
             }),
