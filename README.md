@@ -4,6 +4,17 @@ Live CPU, memory, disk, network and latency graphs in the Windows 11 taskbar, in
 
 **Download:** the [`main-latest`](https://github.com/reconbot/blinkengraphs-win/releases/tag/main-latest) prerelease, rebuilt on every push to `main`, or a [tagged release](https://github.com/reconbot/blinkengraphs-win/releases). Builds are x64 and ARM64. They are not Authenticode-signed, so SmartScreen will warn. Check a download with `gh attestation verify blinkengraphs-x64.exe -R reconbot/blinkengraphs-win`.
 
+## Install
+
+Run `blinkengraphs-x64.msi` (or `-arm64`) from a release and choose **Just me** (no admin, installs to `%LocalAppData%\Programs`) or **Everyone** (Program Files). Both start blinkengraphs at sign-in. Uninstalling keeps your settings and history.
+
+For scripted or Intune deployment:
+
+| Scope | Command | Intune Win32 app context |
+|---|---|---|
+| Per-user | `msiexec /i blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` | User |
+| Per-machine | `msiexec /i blinkengraphs-x64.msi /qn ALLUSERS=1` | System |
+
 ## What it shows
 
 | Section | Meter (always visible) | Panel (on click) |
