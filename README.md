@@ -8,8 +8,8 @@ Download the x64 or ARM64 MSI from the [latest release](https://github.com/recon
 
 | Scope | Install | Uninstall |
 |---|---|---|
-| Per-user | `msiexec /i blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` | `msiexec /x blinkengraphs-x64.msi /qn MSIINSTALLPERUSER=1 ALLUSERS=2` |
-| Per-machine | `msiexec /i blinkengraphs-x64.msi /qn ALLUSERS=1` | `msiexec /x blinkengraphs-x64.msi /qn ALLUSERS=1` |
+| Per-user | `msiexec /i blinkengraphs-x64.msi /qn /norestart MSIINSTALLPERUSER=1 ALLUSERS=2` | `msiexec /x blinkengraphs-x64.msi /qn /norestart MSIINSTALLPERUSER=1 ALLUSERS=2` |
+| Per-machine | `msiexec /i blinkengraphs-x64.msi /qn /norestart ALLUSERS=1` | `msiexec /x blinkengraphs-x64.msi /qn /norestart ALLUSERS=1` |
 
 ## What it shows
 
