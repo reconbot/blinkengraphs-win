@@ -2843,6 +2843,7 @@ version = "1.4.0"
 dependencies = [
  "model",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
