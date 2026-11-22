@@ -3,9 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const MAX_TTL: u8 = 30;
-pub const FULL_SWEEP_EVERY: Duration = Duration::from_secs(30);
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hop {
     pub ttl: u8,
@@ -14,18 +11,29 @@ pub struct Hop {
     pub reached: bool,
 }
 
-/// Remembers how far away the target was so later ticks skip TTLs beyond it.
-#[derive(Default)]
+/// Remembers how far away the target was so later ticks skip TTLs beyond it, sweeping all
+/// `max_ttl` again every `full_sweep_every`.
 pub struct PathMemory {
+    max_ttl: u8,
+    full_sweep_every: Duration,
     len: Option<u8>,
     last_full: Option<Instant>,
 }
 
 impl PathMemory {
+    pub fn new(max_ttl: u8, full_sweep_every: Duration) -> Self {
+        Self {
+            max_ttl,
+            full_sweep_every,
+            len: None,
+            last_full: None,
+        }
+    }
+
     pub fn max_ttl(&self, now: Instant) -> u8 {
         match (self.len, self.last_full) {
-            (Some(len), Some(at)) if now.duration_since(at) < FULL_SWEEP_EVERY => len,
-            _ => MAX_TTL,
+            (Some(len), Some(at)) if now.duration_since(at) < self.full_sweep_every => len,
+            _ => self.max_ttl,
         }
     }
 
@@ -36,7 +44,7 @@ impl PathMemory {
             hops.truncate(i + 1);
         }
         self.len = hops.last().filter(|h| h.reached).map(|h| h.ttl);
-        if swept == MAX_TTL {
+        if swept == self.max_ttl {
             self.last_full = Some(now);
         }
         hops
@@ -46,6 +54,9 @@ impl PathMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MAX_TTL: u8 = 30;
+    const FULL_SWEEP_EVERY: Duration = Duration::from_secs(30);
 
     fn hop(ttl: u8, reached: bool) -> Hop {
         Hop {
@@ -59,7 +70,7 @@ mod tests {
     #[test]
     fn learns_path_length_and_sweeps_fully_again_later() {
         let t0 = Instant::now();
-        let mut m = PathMemory::default();
+        let mut m = PathMemory::new(MAX_TTL, FULL_SWEEP_EVERY);
         assert_eq!(m.max_ttl(t0), MAX_TTL);
         let hops = (1..=MAX_TTL).rev().map(|t| hop(t, t >= 4)).collect();
         let kept = m.record(MAX_TTL, hops, t0);
@@ -71,7 +82,7 @@ mod tests {
     #[test]
     fn path_grew_so_next_tick_sweeps_fully() {
         let t0 = Instant::now();
-        let mut m = PathMemory::default();
+        let mut m = PathMemory::new(MAX_TTL, FULL_SWEEP_EVERY);
         m.record(MAX_TTL, vec![hop(1, false), hop(2, true)], t0);
         assert_eq!(m.max_ttl(t0), 2);
         let kept = m.record(2, vec![hop(1, false), hop(2, false)], t0);

@@ -39,6 +39,11 @@ fn opt(v: &Value) -> Option<f32> {
     v.as_f64().map(|x| x as f32)
 }
 
+/// History as the app opens it, from the merged defaults.
+fn limits() -> history::Limits {
+    config::Config::default().history_limits()
+}
+
 fn icmp_1111() -> Probe {
     serde_json::from_value(json!({"protocol": "icmp", "target": "1.1.1.1"})).unwrap()
 }
@@ -110,7 +115,13 @@ fn probe_stats() {
     let probe = icmp_1111();
     for (name, v) in vectors("probe-stats") {
         let ram_min = (v["ram_s"].as_u64().unwrap() / 60) as u32;
-        let mut h = history::History::open(None, ram_min, 7);
+        let mut h = history::History::open(
+            None,
+            history::Limits {
+                ram_minutes: ram_min,
+                ..limits()
+            },
+        );
         for r in v["results"].as_array().unwrap() {
             h.record_probe(&model::ProbeResult {
                 probe: probe.clone(),
@@ -118,9 +129,13 @@ fn probe_stats() {
                 rtt_ms: opt(&r["rtt_ms"]),
             });
         }
-        let window = v["window_s"].as_u64().unwrap();
         assert_eq!(
-            stat_json(&h.stat(&probe, window)),
+            v["window_s"].as_u64().unwrap(),
+            limits().recent_window_s,
+            "probe-stats/{name} window"
+        );
+        assert_eq!(
+            stat_json(&h.now(&probe)),
             v["expected"],
             "probe-stats/{name}"
         );
@@ -133,10 +148,10 @@ fn hop_trace() {
     for (name, v) in vectors("hop-trace") {
         assert_eq!(
             v["hop_window"].as_u64().unwrap() as usize,
-            history::HOP_WINDOW,
+            limits().hop_window,
             "hop-trace/{name}"
         );
-        let mut h = history::History::open(None, 15, 7);
+        let mut h = history::History::open(None, limits());
         for (i, tick) in v["ticks"].as_array().unwrap().iter().enumerate() {
             for hop in tick.as_array().unwrap() {
                 h.record_hop(&model::HopResult {
@@ -334,22 +349,6 @@ fn public_address() {
         };
         assert_eq!(got, v["expected"], "public-address/{name}");
     }
-}
-
-/// These defaults are still compile-time constants in the engine crates, so an
-/// override of them takes effect only once those crates read `config::defaults`.
-#[test]
-fn engine_constants_match_the_merged_defaults() {
-    let d = config::defaults::get();
-    assert_eq!(probe::MAX_TIMEOUT.as_millis() as u64, d.max_timeout_ms);
-    assert_eq!(probe::QUERY_NAME, d.dns_query_name);
-    assert_eq!(probe::MAX_TTL, d.hop_trace.max_ttl);
-    assert_eq!(
-        probe::FULL_SWEEP_EVERY.as_secs(),
-        d.hop_trace.full_sweep_every_s
-    );
-    assert_eq!(history::HOP_WINDOW, d.hop_trace.hop_window);
-    assert_eq!(history::RECENT_SECS, d.history.recent_window_s);
 }
 
 /// The Default preset in each Appearance against the spec's tokens: the base file is dark;

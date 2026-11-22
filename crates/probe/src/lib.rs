@@ -7,8 +7,6 @@ pub mod public;
 mod resolve;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod trace;
-pub use dns::QUERY_NAME;
-pub use trace::{FULL_SWEEP_EVERY, MAX_TTL};
 #[cfg(windows)]
 mod win;
 
@@ -43,8 +41,18 @@ use std::{
 };
 use trace::{Hop, PathMemory};
 
-/// A Probe's timeout is its interval, capped here.
-pub const MAX_TIMEOUT: Duration = Duration::from_secs(1);
+/// What every Probe Group shares, from the merged defaults (spec `defaults.json`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Limits {
+    /// A Probe's timeout is its interval, capped here.
+    pub max_timeout: Duration,
+    /// The name DNS Probes ask for.
+    pub dns_query_name: String,
+    /// Hop Traces send up to this TTL...
+    pub max_ttl: u8,
+    /// ...and sweep all of them again this often, beyond the last known path length.
+    pub full_sweep_every: Duration,
+}
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug)]
@@ -81,10 +89,11 @@ struct Shared {
     wake: Condvar,
     tx: Sender<Event>,
     resolver: resolve::Resolver,
+    limits: Limits,
 }
 
 impl Prober {
-    pub fn start(groups: Vec<ProbeGroup>) -> (Prober, Receiver<Event>) {
+    pub fn start(groups: Vec<ProbeGroup>, limits: Limits) -> (Prober, Receiver<Event>) {
         let (tx, rx) = channel();
         let prober = Prober {
             shared: Arc::new(Shared {
@@ -96,6 +105,7 @@ impl Prober {
                 wake: Condvar::new(),
                 tx,
                 resolver: Default::default(),
+                limits,
             }),
             threads: Mutex::new(Vec::new()),
         };
@@ -166,7 +176,7 @@ impl Shared {
 
 fn run(shared: &Shared, generation: u64, group: ProbeGroup) {
     let interval = group.interval.max(MIN_INTERVAL);
-    let mut ticker = Ticker::new(group);
+    let mut ticker = Ticker::new(group, &shared.limits);
     let mut next = Instant::now();
     loop {
         {
@@ -187,7 +197,7 @@ fn run(shared: &Shared, generation: u64, group: ProbeGroup) {
                 c = shared.wake.wait_timeout(c, next - now).unwrap().0;
             }
         }
-        ticker.tick(shared, generation, interval.min(MAX_TIMEOUT));
+        ticker.tick(shared, generation, interval.min(shared.limits.max_timeout));
         next += interval;
         next = next.max(Instant::now());
     }
@@ -201,9 +211,13 @@ struct Ticker {
 }
 
 impl Ticker {
-    fn new(group: ProbeGroup) -> Self {
+    fn new(group: ProbeGroup, limits: &Limits) -> Self {
         Ticker {
-            paths: group.traces.iter().map(|_| PathMemory::default()).collect(),
+            paths: group
+                .traces
+                .iter()
+                .map(|_| PathMemory::new(limits.max_ttl, limits.full_sweep_every))
+                .collect(),
             group,
             #[cfg(windows)]
             icmp: win::Icmp::new(),
@@ -273,7 +287,7 @@ impl Ticker {
                     let rtt = addr.and_then(|ip| {
                         let sa = SocketAddr::new(ip, port);
                         match probe.protocol {
-                            Protocol::Dns => net::dns(sa, timeout),
+                            Protocol::Dns => net::dns(sa, timeout, &shared.limits.dns_query_name),
                             Protocol::Udp(_) => net::udp(sa, timeout),
                             _ => net::tcp(sa, timeout),
                         }

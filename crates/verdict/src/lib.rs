@@ -58,7 +58,7 @@ pub fn from_history(h: &history::History, path_up: bool) -> Vec<Finding> {
         .probes()
         .into_iter()
         .map(|p| {
-            let st = h.stat(&p, history::RECENT_SECS);
+            let st = h.now(&p);
             (p, st)
         })
         .collect();

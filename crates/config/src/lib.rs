@@ -59,9 +59,10 @@ impl ProbeView {
 
 impl Default for ProbeView {
     fn default() -> Self {
+        let d = defaults::get();
         Self {
-            window_secs: 30,
-            aggregate: model::Aggregate::P50,
+            window_secs: d.history.recent_window_s,
+            aggregate: d.readout_aggregate,
         }
     }
 }
@@ -366,6 +367,30 @@ impl HistoryConfig {
     pub const MAX_DAYS: u32 = 365;
 }
 
+impl Config {
+    /// What every Probe Group shares, from the merged defaults.
+    pub fn probe_limits(&self) -> probe::Limits {
+        let d = defaults::get();
+        probe::Limits {
+            max_timeout: std::time::Duration::from_millis(d.max_timeout_ms),
+            dns_query_name: d.dns_query_name,
+            max_ttl: d.hop_trace.max_ttl,
+            full_sweep_every: std::time::Duration::from_secs(d.hop_trace.full_sweep_every_s),
+        }
+    }
+
+    /// What History keeps: the user's retention, the spec's windows.
+    pub fn history_limits(&self) -> history::Limits {
+        let d = defaults::get();
+        history::Limits {
+            ram_minutes: self.history.ram_minutes,
+            rollup_days: self.history.rollup_days,
+            hop_window: d.hop_trace.hop_window,
+            recent_window_s: d.history.recent_window_s,
+        }
+    }
+}
+
 impl Default for HistoryConfig {
     fn default() -> Self {
         let h = defaults::get().history;
@@ -403,7 +428,7 @@ impl Default for Config {
                 mode: d.appearance,
                 ..Default::default()
             },
-            graph_aggregate: model::Aggregate::Avg,
+            graph_aggregate: d.graph_aggregate,
             probe_views: Default::default(),
             sections: vec![
                 all(&[CpuTotal]),

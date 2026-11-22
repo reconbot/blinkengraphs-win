@@ -1,5 +1,5 @@
 use model::{Probe, ProbeResult, Protocol, Target};
-use probe::{Event, ProbeGroup, Prober};
+use probe::{Event, Limits, ProbeGroup, Prober};
 use std::{
     net::{IpAddr, Ipv4Addr, TcpListener},
     sync::mpsc::Receiver,
@@ -8,6 +8,15 @@ use std::{
 };
 
 const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+fn limits() -> Limits {
+    Limits {
+        max_timeout: Duration::from_secs(1),
+        dns_query_name: "cloudflare.com".into(),
+        max_ttl: 30,
+        full_sweep_every: Duration::from_secs(30),
+    }
+}
 
 fn tcp(port: u16) -> Probe {
     Probe {
@@ -44,7 +53,7 @@ fn drain(rx: &Receiver<Event>) {
 fn tcp_group_ticks() {
     let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (_prober, rx) = Prober::start(vec![group(vec![tcp(port)], vec![])]);
+    let (_prober, rx) = Prober::start(vec![group(vec![tcp(port)], vec![])], limits());
     let start = Instant::now();
     for _ in 0..3 {
         let r = next_probe(&rx);
@@ -58,7 +67,7 @@ fn tcp_group_ticks() {
 fn pause_stops_results() {
     let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (prober, rx) = Prober::start(vec![group(vec![tcp(port)], vec![])]);
+    let (prober, rx) = Prober::start(vec![group(vec![tcp(port)], vec![])], limits());
     next_probe(&rx);
     prober.set_paused(true);
     drain(&rx);
@@ -76,7 +85,7 @@ fn reconfigure_swaps_probes() {
         a.local_addr().unwrap().port(),
         b.local_addr().unwrap().port(),
     );
-    let (prober, rx) = Prober::start(vec![group(vec![tcp(pa)], vec![])]);
+    let (prober, rx) = Prober::start(vec![group(vec![tcp(pa)], vec![])], limits());
     assert_eq!(next_probe(&rx).probe, tcp(pa));
     prober.reconfigure(vec![group(vec![tcp(pb)], vec![])]);
     drain(&rx);
@@ -91,7 +100,7 @@ fn host_resolution_is_reported() {
         target: Target::Name("localhost".into()),
         protocol: Protocol::Tcp(1),
     };
-    let (_prober, rx) = Prober::start(vec![group(vec![probe], vec![])]);
+    let (_prober, rx) = Prober::start(vec![group(vec![probe], vec![])], limits());
     match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
         Event::Resolved { target, addr } => {
             assert_eq!(target, Target::Name("localhost".into()));
@@ -108,7 +117,11 @@ fn icmp_to_localhost_replies() {
         target: Target::Addr(LOCALHOST),
         protocol: Protocol::Icmp,
     };
-    let (_prober, rx) = Prober::start(vec![group(vec![icmp.clone()], vec![icmp.clone()])]);
+    let (_prober, rx) = Prober::start(vec![group(
+        vec![icmp.clone()],
+        vec![icmp.clone()],
+        limits(),
+    )]);
     let r = next_probe(&rx);
     assert_eq!(r.probe, icmp);
     assert!(r.rtt_ms.is_some());

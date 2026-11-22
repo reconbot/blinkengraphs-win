@@ -105,7 +105,7 @@ impl Default for Panel {
             range: Range::Min1,
             sort: ProcessSort::Impact,
             scroll_to_top: false,
-            graph_aggregate: model::Aggregate::Avg,
+            graph_aggregate: config::defaults::get().graph_aggregate,
         }
     }
 }
@@ -351,10 +351,14 @@ impl Panel {
             for (i, p) in probes.iter().enumerate() {
                 let v = config.probe_view(p);
                 let sum = view.history.aggregate(p, v.window_secs, v.aggregate);
-                let st = view.history.stat(p, history::RECENT_SECS);
+                let st = view.history.now(p);
+                // A p50 readout is the plain RTT, so it goes unnamed (spec `rules/probe-stats.md`).
+                let named = match v.aggregate {
+                    model::Aggregate::P50 => String::new(),
+                    a => format!("{} ", a.label()),
+                };
                 let text = format!(
-                    "{p}  {} {}  {:.0}%{}",
-                    v.aggregate.label(),
+                    "{p}  {named}{}  {:.0}%{}",
                     sum.value
                         .map(|r| format!("{r:.1} ms"))
                         .unwrap_or("—".into()),
@@ -391,6 +395,7 @@ impl Panel {
         Window {
             now: view.now as f64,
             secs: self.range.secs(view.history, view.now) as f64,
+            aggregate: self.graph_aggregate,
         }
     }
 
@@ -695,6 +700,22 @@ fn format_value(m: Metric, v: f64) -> String {
 struct Window {
     now: f64,
     secs: f64,
+    /// What each point shows when it covers several samples.
+    aggregate: model::Aggregate,
+}
+
+/// Names the graph aggregate in the plot's top-right corner (spec `rules/graph-aggregate.md`).
+fn aggregate_tag(pu: &mut egui_plot::PlotUi, w: Window) {
+    let top = pu.plot_bounds().max()[1];
+    pu.text(
+        egui_plot::Text::new(
+            "",
+            egui_plot::PlotPoint::new(0.0, top),
+            RichText::new(w.aggregate.label()).small(),
+        )
+        .anchor(egui::Align2::RIGHT_TOP)
+        .color(theme::text_weak()),
+    );
 }
 
 fn to_line(
@@ -736,6 +757,7 @@ fn sparkplot(
     }
     plot.show(ui, |pu| {
         unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
+        aggregate_tag(pu, w);
         for (name, color, pts) in &series {
             pu.line(to_line(*name, *color, pts, true, w));
         }
@@ -754,6 +776,7 @@ fn multiplot(
         .y_axis_formatter(|m, _| format!("{:.0} ms", m.value))
         .show(ui, |pu| {
             unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
+            aggregate_tag(pu, w);
             for (name, color, pts) in series {
                 pu.line(to_line(name.clone(), *color, pts, false, w));
                 let lost: Vec<[f64; 2]> = pts
