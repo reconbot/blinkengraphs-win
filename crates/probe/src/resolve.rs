@@ -15,7 +15,12 @@ pub struct Resolver {
 
 impl Resolver {
     /// Calls `changed` when the answer differs from the cached one, including the first answer.
-    pub fn resolve(&self, target: &Target, changed: impl FnOnce(Option<IpAddr>)) -> Option<IpAddr> {
+    pub fn resolve(
+        &self,
+        target: &Target,
+        lookup: impl FnOnce(&Target) -> Option<IpAddr>,
+        changed: impl FnOnce(Option<IpAddr>),
+    ) -> Option<IpAddr> {
         if let Target::Addr(a) = target {
             return Some(*a);
         }
@@ -38,7 +43,7 @@ impl Resolver {
     }
 }
 
-fn lookup(target: &Target) -> Option<IpAddr> {
+pub(crate) fn lookup(target: &Target) -> Option<IpAddr> {
     match target {
         Target::Addr(a) => Some(*a),
         Target::Name(name) => {
@@ -72,9 +77,9 @@ mod tests {
         let r = Resolver::default();
         let host = Target::Name("localhost".into());
         let mut seen = vec![];
-        let first = r.resolve(&host, |a| seen.push(a));
+        let first = r.resolve(&host, lookup, |a| seen.push(a));
         assert!(first.is_some_and(|a| a.is_loopback()));
-        r.resolve(&host, |a| seen.push(a));
+        r.resolve(&host, lookup, |a| seen.push(a));
         assert_eq!(seen, vec![first]);
     }
 
@@ -82,6 +87,6 @@ mod tests {
     fn literal_addresses_need_no_lookup() {
         let r = Resolver::default();
         let a: IpAddr = "192.0.2.1".parse().unwrap();
-        assert_eq!(r.resolve(&Target::Addr(a), |_| panic!()), Some(a));
+        assert_eq!(r.resolve(&Target::Addr(a), lookup, |_| panic!()), Some(a));
     }
 }

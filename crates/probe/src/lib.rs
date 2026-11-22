@@ -8,6 +8,7 @@ pub mod public;
 mod resolve;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod trace;
+pub mod transport;
 #[cfg(windows)]
 mod win;
 
@@ -41,6 +42,7 @@ use std::{
     time::{Duration, Instant},
 };
 use trace::{Hop, PathMemory};
+pub use transport::{Echo, SystemTransport, Transport};
 
 /// What every Probe Group shares, from the merged defaults (spec `defaults.json`).
 #[derive(Clone, Debug, PartialEq)]
@@ -91,10 +93,20 @@ struct Shared {
     tx: Sender<Event>,
     resolver: resolve::Resolver,
     limits: Limits,
+    net: Box<dyn Transport>,
 }
 
 impl Prober {
     pub fn start(groups: Vec<ProbeGroup>, limits: Limits) -> (Prober, Receiver<Event>) {
+        Self::start_with(groups, limits, SystemTransport::default())
+    }
+
+    /// With a scripted network in tests.
+    pub fn start_with(
+        groups: Vec<ProbeGroup>,
+        limits: Limits,
+        net: impl Transport,
+    ) -> (Prober, Receiver<Event>) {
         let (tx, rx) = channel();
         let prober = Prober {
             shared: Arc::new(Shared {
@@ -107,6 +119,7 @@ impl Prober {
                 tx,
                 resolver: Default::default(),
                 limits,
+                net: Box::new(net),
             }),
             threads: Mutex::new(Vec::new()),
         };
@@ -164,14 +177,18 @@ impl Shared {
     }
 
     fn resolve(&self, target: &Target) -> Option<IpAddr> {
-        self.resolver.resolve(target, |addr| {
-            if !self.control.lock().unwrap().stopped {
-                let _ = self.tx.send(Event::Resolved {
-                    target: target.clone(),
-                    addr,
-                });
-            }
-        })
+        self.resolver.resolve(
+            target,
+            |t| self.net.lookup(t),
+            |addr| {
+                if !self.control.lock().unwrap().stopped {
+                    let _ = self.tx.send(Event::Resolved {
+                        target: target.clone(),
+                        addr,
+                    });
+                }
+            },
+        )
     }
 }
 
@@ -207,8 +224,6 @@ fn run(shared: &Shared, generation: u64, group: ProbeGroup) {
 struct Ticker {
     group: ProbeGroup,
     paths: Vec<PathMemory>,
-    #[cfg(windows)]
-    icmp: Option<win::Icmp>,
 }
 
 impl Ticker {
@@ -220,17 +235,17 @@ impl Ticker {
                 .map(|_| PathMemory::new(limits.max_ttl, limits.full_sweep_every))
                 .collect(),
             group,
-            #[cfg(windows)]
-            icmp: win::Icmp::new(),
         }
     }
 
     fn tick(&mut self, shared: &Shared, generation: u64, timeout: Duration) {
-        if !path_up() {
+        let net = &*shared.net;
+        let (v4_up, v6_up) = (net.family_up(false), net.family_up(true));
+        // No path at all: the Verdict says Offline, and no Probe counts as lost.
+        if !v4_up && !v6_up {
             return;
         }
         let at = model::now();
-        let (v4_up, v6_up) = (family_up(false), family_up(true));
         let mut addrs: HashMap<&Target, Option<IpAddr>> = HashMap::new();
         for p in self.group.probes.iter().chain(&self.group.traces) {
             if !addrs.contains_key(&p.target) {
@@ -270,6 +285,7 @@ impl Ticker {
             .traces
             .iter()
             .zip(self.paths.iter_mut())
+            .filter(|(t, _)| reachable(&t.target))
             .partition(|(t, _)| t.protocol == Protocol::Icmp);
 
         thread::scope(|s| {
@@ -288,67 +304,55 @@ impl Ticker {
                     let rtt = addr.and_then(|ip| {
                         let sa = SocketAddr::new(ip, port);
                         match probe.protocol {
-                            Protocol::Dns => net::dns(sa, timeout, &shared.limits.dns_query_name),
-                            Protocol::Udp(_) => net::udp(sa, timeout),
-                            _ => net::tcp(sa, timeout),
+                            Protocol::Dns => net.dns(sa, timeout, &shared.limits.dns_query_name),
+                            Protocol::Udp(_) => net.udp(sa, timeout),
+                            _ => net.tcp(sa, timeout),
                         }
                     });
                     emit_probe(probe, rtt);
                 });
             }
 
-            #[cfg(windows)]
-            for (trace, path) in tcp_paths.into_iter().filter(|(t, _)| reachable(&t.target)) {
-                let Protocol::Tcp(port) = trace.protocol else {
-                    continue;
-                };
-                let Some(IpAddr::V4(ip)) = addrs[&trace.target] else {
+            for (trace, path) in tcp_paths {
+                let (Protocol::Tcp(port), Some(IpAddr::V4(ip))) =
+                    (trace.protocol, addrs[&trace.target])
+                else {
                     continue;
                 };
                 let emit_hops = &emit_hops;
                 s.spawn(move || {
                     let now = Instant::now();
                     let swept = path.max_ttl(now);
-                    let hops = win::tcp_trace(ip, port, swept, timeout);
-                    emit_hops(trace, path.record(swept, hops, now));
+                    if let Some(hops) = net.tcp_trace(ip, port, swept, timeout) {
+                        emit_hops(trace, path.record(swept, hops, now));
+                    }
                 });
             }
-            #[cfg(not(windows))]
-            let _ = (tcp_paths, &emit_hops);
 
-            #[cfg(windows)]
-            if let Some(icmp) = &self.icmp {
-                let probes: Vec<Probe> = self
-                    .group
-                    .probes
-                    .iter()
-                    .filter(|p| reachable(&p.target))
-                    .cloned()
-                    .collect();
-                let icmp_paths: Vec<_> = icmp_paths
-                    .into_iter()
-                    .filter(|(t, _)| reachable(&t.target))
-                    .collect();
-                icmp_tick(
-                    icmp,
-                    &probes,
-                    icmp_paths,
-                    &addrs,
-                    timeout,
-                    &emit_probe,
-                    &emit_hops,
-                );
-            }
-            #[cfg(not(windows))]
-            let _ = icmp_paths;
+            let probes: Vec<&Probe> = self
+                .group
+                .probes
+                .iter()
+                .filter(|p| p.protocol == Protocol::Icmp && reachable(&p.target))
+                .collect();
+            icmp_tick(
+                net,
+                &probes,
+                icmp_paths,
+                &addrs,
+                timeout,
+                &emit_probe,
+                &emit_hops,
+            );
         });
     }
 }
 
-#[cfg(windows)]
+/// ICMP Probes and ICMP Hop Traces go out as one batch, so a trace's TTLs and the Probes
+/// share one timeout instead of queueing.
 fn icmp_tick(
-    icmp: &win::Icmp,
-    probes: &[Probe],
+    net: &dyn Transport,
+    probes: &[&Probe],
     traces: Vec<(&Probe, &mut PathMemory)>,
     addrs: &HashMap<&Target, Option<IpAddr>>,
     timeout: Duration,
@@ -361,16 +365,14 @@ fn icmp_tick(
     }
     let mut requests: Vec<(IpAddr, u8)> = Vec::new();
     let mut tags = Vec::new();
+    let mut unresolved = Vec::new();
     for (i, probe) in probes.iter().enumerate() {
-        if probe.protocol != Protocol::Icmp {
-            continue;
-        }
         match addrs[&probe.target] {
             Some(ip) => {
                 requests.push((ip, 128));
                 tags.push(Tag::Probe(i));
             }
-            None => emit_probe(probe, None),
+            None => unresolved.push(*probe),
         }
     }
     let now = Instant::now();
@@ -385,23 +387,24 @@ fn icmp_tick(
             }
         }
     }
-    if requests.is_empty() {
+    if requests.is_empty() && unresolved.is_empty() {
         return;
     }
-
-    let replies = icmp.batch(&requests, timeout);
+    let Some(replies) = net.echo(&requests, timeout) else {
+        return;
+    };
+    for probe in unresolved {
+        emit_probe(probe, None);
+    }
     let mut hops: Vec<Vec<Hop>> = traces.iter().map(|_| Vec::new()).collect();
     for (tag, reply) in tags.into_iter().zip(replies) {
         match tag {
-            Tag::Probe(i) => emit_probe(
-                &probes[i],
-                reply.filter(|r| r.status == win::IP_SUCCESS).map(|r| r.rtt),
-            ),
+            Tag::Probe(i) => emit_probe(probes[i], reply.filter(|r| r.reached).map(|r| r.rtt)),
             Tag::Hop(i, ttl) => hops[i].push(Hop {
                 ttl,
-                addr: reply.as_ref().map(|r| r.from),
-                rtt_ms: reply.as_ref().map(|r| net::ms(r.rtt)),
-                reached: reply.is_some_and(|r| r.status == win::IP_SUCCESS),
+                addr: reply.map(|r| r.from),
+                rtt_ms: reply.map(|r| net::ms(r.rtt)),
+                reached: reply.is_some_and(|r| r.reached),
             }),
         }
     }
