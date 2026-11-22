@@ -67,28 +67,93 @@ pub fn run() {
     install_crash_log();
     let path = config::dir().join("config.toml");
     let (config, error) = Config::load(&path);
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("blinkengraphs")
+        .with_inner_size(PANEL)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_taskbar(false)
+        .with_always_on_top()
+        .with_visible(false)
+        .with_position([-32000.0, -32000.0]);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("blinkengraphs")
-            .with_inner_size(PANEL)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_taskbar(false)
-            .with_always_on_top()
-            .with_visible(false)
-            .with_position([-32000.0, -32000.0]),
+        viewport: viewport.clone(),
         ..Default::default()
     };
+    if !opengl2() {
+        // A VM or VDI host without a GPU driver offers only Windows' OpenGL 1.1; egui_glow needs 2.0.
+        if let Err(e) = crate::soft::run(viewport, move |ctx| App::new(ctx, config, error, path)) {
+            crash_log(&format!("software window failed: {e}"));
+        }
+        return;
+    }
     if let Err(e) = eframe::run_native(
         "blinkengraphs",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, config, error, path)))),
+        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, config, error, path)))),
     ) {
         crash_log(&format!("window failed to start: {e}"));
     }
 }
 
-struct App {
+/// Whether the default OpenGL driver is 2.0 or later, from a throwaway legacy WGL context.
+/// winit allows one event loop per process, so this has to be known before eframe starts.
+fn opengl2() -> bool {
+    use windows_sys::Win32::{
+        Graphics::{Gdi::*, OpenGL::*},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::*,
+    };
+    unsafe {
+        let hwnd = CreateWindowExW(
+            0,
+            windows_sys::core::w!("STATIC"),
+            std::ptr::null(),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null(),
+        );
+        let dc = GetDC(hwnd);
+        let pfd = PIXELFORMATDESCRIPTOR {
+            nSize: size_of::<PIXELFORMATDESCRIPTOR>() as u16,
+            nVersion: 1,
+            dwFlags: PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+            iPixelType: PFD_TYPE_RGBA,
+            cColorBits: 32,
+            iLayerType: PFD_MAIN_PLANE as u8,
+            ..std::mem::zeroed()
+        };
+        let mut major = 0;
+        if SetPixelFormat(dc, ChoosePixelFormat(dc, &pfd), &pfd) != 0 {
+            let rc = wglCreateContext(dc);
+            if !rc.is_null() && wglMakeCurrent(dc, rc) != 0 {
+                let v = glGetString(GL_VERSION);
+                if !v.is_null() {
+                    major = std::ffi::CStr::from_ptr(v.cast())
+                        .to_bytes()
+                        .iter()
+                        .take_while(|b| b.is_ascii_digit())
+                        .fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+                }
+                wglMakeCurrent(std::ptr::null_mut(), std::ptr::null_mut());
+            }
+            if !rc.is_null() {
+                wglDeleteContext(rc);
+            }
+        }
+        ReleaseDC(hwnd, dc);
+        DestroyWindow(hwnd);
+        major >= 2
+    }
+}
+
+pub(crate) struct App {
     engine: Engine,
     config: Config,
     path: PathBuf,
@@ -120,13 +185,8 @@ enum MenuAction {
 }
 
 impl App {
-    fn new(
-        cc: &eframe::CreationContext,
-        config: Config,
-        error: Option<String>,
-        path: PathBuf,
-    ) -> Self {
-        let ctx = cc.egui_ctx.clone();
+    fn new(ctx: &egui::Context, config: Config, error: Option<String>, path: PathBuf) -> Self {
+        let ctx = ctx.clone();
         panel::theme::install(&ctx);
 
         let (tx, events) = mpsc::channel();
@@ -385,6 +445,16 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tick(ctx)
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui)
+    }
+}
+
+impl App {
+    pub(crate) fn tick(&mut self, ctx: &egui::Context) {
         if !self.styled {
             self.styled = style_window();
             // eframe shows the root viewport after its first frame even when built invisible.
@@ -435,7 +505,7 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         if !self.visible {
             return;
         }
@@ -704,7 +774,7 @@ fn install_crash_log() {
     }));
 }
 
-fn crash_log(msg: &str) {
+pub(crate) fn crash_log(msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
