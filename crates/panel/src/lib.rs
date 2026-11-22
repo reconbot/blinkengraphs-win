@@ -317,7 +317,9 @@ impl Panel {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(p) = probes.first() {
                     let v = config.probe_view(p);
-                    let st = view.history.aggregate(p, v.window_secs, v.aggregate);
+                    let st = view
+                        .history
+                        .aggregate(p, view.now, v.window_secs, v.aggregate);
                     let rtt = st
                         .value
                         .map(|r| model::rtt_text(r as f64))
@@ -353,8 +355,10 @@ impl Panel {
         ui.horizontal_wrapped(|ui| {
             for (i, p) in probes.iter().enumerate() {
                 let v = config.probe_view(p);
-                let sum = view.history.aggregate(p, v.window_secs, v.aggregate);
-                let st = view.history.now(p);
+                let sum = view
+                    .history
+                    .aggregate(p, view.now, v.window_secs, v.aggregate);
+                let st = view.history.now(p, view.now);
                 // A p50 readout is the plain RTT, so it goes unnamed (spec `rules/probe-stats.md`).
                 let named = match v.aggregate {
                     model::Aggregate::P50 => String::new(),
@@ -366,7 +370,7 @@ impl Panel {
                         .map(|r| model::rtt_text(r as f64))
                         .unwrap_or("—".into()),
                     sum.loss * 100.0,
-                    st.jitter_ms
+                    st.and_then(|s| s.jitter_ms)
                         .map(|j| format!("  ±{j:.0}"))
                         .unwrap_or_default()
                 );

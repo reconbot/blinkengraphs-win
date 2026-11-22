@@ -336,6 +336,7 @@ impl App {
         }
         self.drawn_samples = s.sample_count;
         let taskbar = taskbar_theme();
+        let now = model::now();
         let attached = self.config.surface == Surface::TaskbarStrip
             && self.strip.geometry().is_some_and(|(scale, h)| {
                 let img = meters::strip(
@@ -345,6 +346,7 @@ impl App {
                     scale,
                     self.font.as_ref(),
                     taskbar,
+                    now,
                 );
                 self.strip.show(&img)
             });
@@ -360,7 +362,7 @@ impl App {
                 continue;
             }
             let img = if attached {
-                meters::menu_icon(&s.history, &self.config, &s.findings, self.px, taskbar)
+                meters::menu_icon(&s.history, &self.config, &s.findings, self.px, taskbar, now)
             } else {
                 meters::draw(
                     *section,
@@ -369,6 +371,7 @@ impl App {
                     &self.config.section(*section).tray,
                     self.px,
                     taskbar,
+                    now,
                 )
             };
             if let Ok(i) = Icon::from_rgba(render::to_rgba(&img), self.px, self.px) {
@@ -383,6 +386,7 @@ impl App {
                 &s.history,
                 &self.config,
                 &s.findings,
+                now,
             )));
         }
     }

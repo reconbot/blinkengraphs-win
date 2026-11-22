@@ -365,6 +365,8 @@ pub struct HistoryConfig {
 
 impl HistoryConfig {
     pub const MAX_DAYS: u32 = 365;
+    /// Minutes stay on disk this long until Archives replace them (#40).
+    const MINUTE_DAYS: u32 = 7;
 }
 
 impl Config {
@@ -396,8 +398,8 @@ impl Default for HistoryConfig {
     fn default() -> Self {
         let h = defaults::get().history;
         Self {
-            ram_minutes: h.ram_minutes,
-            rollup_days: h.rollup_days,
+            ram_minutes: h.raw_minutes,
+            rollup_days: Self::MINUTE_DAYS,
         }
     }
 }

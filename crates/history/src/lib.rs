@@ -1,4 +1,9 @@
+pub mod archive;
+pub mod pause;
+pub mod range;
 mod sketch;
+pub use archive::Row;
+use range::exact;
 pub use sketch::{Sketch, index as sketch_index, rep as sketch_rep};
 
 use model::{Aggregate, HopResult, Metric, Probe, ProbeResult, ProbeStat, Sample};
@@ -48,95 +53,6 @@ pub struct Point {
     pub secs: u64,
     pub value: f32,
     pub loss: f32,
-}
-
-/// Everything kept about one key's minute, or a merge of several (spec `rules/graph-aggregate.md`).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Minute {
-    pub n: u64,
-    pub lost: u64,
-    pub sum: f64,
-    pub min: f64,
-    pub max: f64,
-    pub sketch: Sketch,
-}
-
-impl Minute {
-    /// `values` in arrival order, so `sum` is reproducible.
-    pub fn of(values: &[Option<f32>]) -> Self {
-        let mut m = Minute {
-            min: f64::INFINITY,
-            max: f64::NEG_INFINITY,
-            ..Minute::default()
-        };
-        for v in values {
-            match v {
-                Some(v) => {
-                    let v = *v as f64;
-                    m.n += 1;
-                    m.sum += v;
-                    m.min = m.min.min(v);
-                    m.max = m.max.max(v);
-                    m.sketch.add(v);
-                }
-                None => m.lost += 1,
-            }
-        }
-        m
-    }
-
-    /// Merge minutes in ascending time order; f64 addition is not associative.
-    pub fn merge(&mut self, o: &Minute) {
-        if self.n == 0 && self.lost == 0 {
-            *self = o.clone();
-            return;
-        }
-        self.n += o.n;
-        self.lost += o.lost;
-        self.sum += o.sum;
-        self.min = self.min.min(o.min);
-        self.max = self.max.max(o.max);
-        self.sketch.merge(&o.sketch);
-    }
-
-    pub fn value(&self, agg: Aggregate) -> Option<f64> {
-        if self.n == 0 {
-            return None;
-        }
-        match agg {
-            Aggregate::Avg => Some(self.sum / self.n as f64),
-            Aggregate::Max => Some(self.max),
-            Aggregate::P50 => self.sketch.quantile(500, self.min, self.max),
-            Aggregate::P95 => self.sketch.quantile(950, self.min, self.max),
-            Aggregate::P99 => self.sketch.quantile(990, self.min, self.max),
-        }
-    }
-
-    pub fn loss(&self) -> f32 {
-        let total = self.n + self.lost;
-        if total == 0 {
-            0.0
-        } else {
-            self.lost as f32 / total as f32
-        }
-    }
-}
-
-/// Raw values in one bucket, aggregated exactly with the same rank rule as the sketch.
-fn exact(values: &[Option<f32>], agg: Aggregate) -> Option<f64> {
-    let mut v: Vec<f64> = values.iter().flatten().map(|x| *x as f64).collect();
-    if v.is_empty() {
-        return None;
-    }
-    let per_mille = match agg {
-        Aggregate::Avg => return Some(v.iter().sum::<f64>() / v.len() as f64),
-        Aggregate::Max => return v.into_iter().reduce(f64::max),
-        Aggregate::P50 => 500,
-        Aggregate::P95 => 950,
-        Aggregate::P99 => 990,
-    };
-    v.sort_by(f64::total_cmp);
-    Some(v[(per_mille * (v.len() as u64 - 1) / 1000) as usize])
 }
 
 /// One row of an mtr-style table.
@@ -203,7 +119,7 @@ pub struct Storage {
     pub minutes: u64,
 }
 
-/// Bytes per stored Minute when the database is too young to measure (research 06, synthetic data).
+/// Bytes per stored Row when the database is too young to measure (research 06, synthetic data).
 const BYTES_PER_MINUTE_ROW: f64 = 94.0;
 
 /// Disk needed to keep `days` of history for `series` keys, from the measured row size once there is enough data.
@@ -318,50 +234,22 @@ impl History {
             .unwrap_or_default()
     }
 
-    /// The Probe's stats over the recent window (`Limits::recent_window_s`).
-    pub fn now(&self, probe: &Probe) -> ProbeStat {
-        self.stat(probe, self.recent_secs)
+    /// The Probe's stats over the recent window (`Limits::recent_window_s`) back from `now`;
+    /// `None` while that window is empty.
+    pub fn now(&self, probe: &Probe, now: u64) -> Option<ProbeStat> {
+        let q = self.ram.get(&Key::Probe(probe.clone()))?;
+        let results: Vec<_> = q.iter().copied().collect();
+        probe_stats(&results, now, self.recent_secs, self.ram_secs)
     }
 
-    pub fn stat(&self, probe: &Probe, window_secs: u64) -> ProbeStat {
-        let Some(q) = self.ram.get(&Key::Probe(probe.clone())) else {
-            return ProbeStat::default();
-        };
-        let newest = q.back().map(|(t, _)| *t).unwrap_or(0);
-        let window: Vec<Option<f32>> = q
-            .iter()
-            .filter(|(t, _)| *t + window_secs > newest)
-            .map(|(_, v)| *v)
-            .collect();
-        let replies: Vec<f32> = window.iter().flatten().copied().collect();
-        let all: Vec<f32> = q.iter().filter_map(|(_, v)| *v).collect();
-        let jitter = (replies.len() > 1).then(|| {
-            replies.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>()
-                / (replies.len() - 1) as f32
-        });
-        ProbeStat {
-            loss: if window.is_empty() {
-                0.0
-            } else {
-                1.0 - replies.len() as f32 / window.len() as f32
-            },
-            rtt_ms: percentile(replies, 50),
-            // Lowest decile: what the path does when nothing is queued, so a long congestion
-            // episode can't become "normal".
-            baseline_ms: percentile(all, 10),
-            jitter_ms: jitter,
-        }
-    }
-
-    /// One value for `probe` over the last `window_secs`, with the share of Probes lost.
-    pub fn aggregate(&self, probe: &Probe, window_secs: u64, agg: Aggregate) -> Summary {
+    /// One value for `probe` over the `window_secs` back from `now`, with the share of Probes lost.
+    pub fn aggregate(&self, probe: &Probe, now: u64, window_secs: u64, agg: Aggregate) -> Summary {
         let Some(q) = self.ram.get(&Key::Probe(probe.clone())) else {
             return Summary::default();
         };
-        let newest = q.back().map(|(t, _)| *t).unwrap_or(0);
         let window: Vec<Option<f32>> = q
             .iter()
-            .filter(|(t, _)| *t + window_secs > newest)
+            .filter(|(t, _)| *t + window_secs > now)
             .map(|(_, v)| *v)
             .collect();
         let replies: Vec<f32> = window.iter().flatten().copied().collect();
@@ -380,6 +268,11 @@ impl History {
                 1.0 - window.iter().flatten().count() as f32 / window.len() as f32
             },
         }
+    }
+
+    /// The Probe stats window, `Limits::recent_window_s`.
+    pub fn window_s(&self) -> u64 {
+        self.recent_secs
     }
 
     pub fn hops(&self, trace: &Probe) -> Vec<Hop> {
@@ -520,7 +413,7 @@ impl History {
     }
 
     /// Stored Minutes for `key` in `[from, to)`, ascending.
-    pub fn minutes(&self, key: &Key, from: u64, to: u64) -> Vec<(u64, Minute)> {
+    pub fn minutes(&self, key: &Key, from: u64, to: u64) -> Vec<(u64, Row)> {
         let Some(db) = &self.db else { return vec![] };
         let mut stmt = db
             .prepare_cached(
@@ -533,7 +426,7 @@ impl History {
             let sk: Vec<u8> = r.get(6)?;
             Ok((
                 r.get::<_, i64>(0)? as u64,
-                Minute {
+                Row {
                     n: r.get::<_, i64>(1)? as u64,
                     lost: r.get::<_, i64>(2)? as u64,
                     sum: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
@@ -584,7 +477,7 @@ impl History {
                 params![key.id()],
             );
             for (at, vs) in buckets {
-                write_minute(&tx, &key.id(), at, &Minute::of(&vs));
+                write_minute(&tx, &key.id(), at, &Row::of(&vs));
             }
         }
         let _ = tx.execute(
@@ -608,7 +501,43 @@ impl History {
     }
 }
 
-/// Writes every stored Minute of every key to `out` as CSV, reading `db` through its own connection
+/// A Probe's stats from its `(at, rtt_ms)` results in arrival order (spec `rules/probe-stats.md`).
+/// The window is `at > now − window_s` and the baseline spans Raw, `at > now − raw_s`, both
+/// back from `now` so results from before a Pause age out. An empty window has no stats.
+pub fn probe_stats(
+    results: &[(u64, Option<f32>)],
+    now: u64,
+    window_s: u64,
+    raw_s: u64,
+) -> Option<ProbeStat> {
+    let window: Vec<Option<f32>> = results
+        .iter()
+        .filter(|(t, _)| t + window_s > now)
+        .map(|(_, v)| *v)
+        .collect();
+    if window.is_empty() {
+        return None;
+    }
+    let replies: Vec<f32> = window.iter().flatten().copied().collect();
+    let raw: Vec<f32> = results
+        .iter()
+        .filter(|(t, _)| t + raw_s > now)
+        .filter_map(|(_, v)| *v)
+        .collect();
+    let jitter = (replies.len() > 1).then(|| {
+        replies.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>() / (replies.len() - 1) as f32
+    });
+    Some(ProbeStat {
+        loss: 1.0 - replies.len() as f32 / window.len() as f32,
+        rtt_ms: percentile(replies, 50),
+        // Lowest decile: what the path does when nothing is queued, so a long congestion
+        // episode can't become "normal".
+        baseline_ms: percentile(raw, 10),
+        jitter_ms: jitter,
+    })
+}
+
+/// Writes every stored Row of every key to `out` as CSV, reading `db` through its own connection
 /// so the engine keeps sampling. Returns the number of rows.
 pub fn export_csv(db: &Path, out: &Path) -> std::io::Result<u64> {
     use std::io::Write;
@@ -630,7 +559,7 @@ pub fn export_csv(db: &Path, out: &Path) -> std::io::Result<u64> {
     let mut count = 0;
     while let Some(r) = rows.next().map_err(err)? {
         let sk: Vec<u8> = r.get(7).map_err(err)?;
-        let m = Minute {
+        let m = Row {
             n: r.get::<_, i64>(2).map_err(err)? as u64,
             lost: r.get::<_, i64>(3).map_err(err)? as u64,
             sum: r.get::<_, Option<f64>>(4).map_err(err)?.unwrap_or(0.0),
@@ -705,7 +634,7 @@ fn utc(secs: u64) -> String {
 
 fn flush_one(c: &Connection, key: &str, at: u64, values: &[Option<f32>]) {
     let _ = c.execute("INSERT OR IGNORE INTO key (name) VALUES (?1)", params![key]);
-    write_minute(c, key, at, &Minute::of(values));
+    write_minute(c, key, at, &Row::of(values));
 }
 
 /// A graph's RAM bucket width for a span shown in up to 240 points (spec `rules/history.md`).
@@ -723,14 +652,14 @@ pub fn buckets(
     w: u64,
     written: u64,
     ram: impl Iterator<Item = (u64, Option<f32>)>,
-    stored: &[(u64, Minute)],
+    stored: &[(u64, Row)],
     agg: Aggregate,
 ) -> Vec<Point> {
     let w = w.max(1);
     let c = written;
     let mut out = Vec::new();
     let big = w.div_ceil(60) * 60;
-    let mut cur: Option<(u64, Minute)> = None;
+    let mut cur: Option<(u64, Row)> = None;
     for (m, minute) in stored.iter().filter(|(m, _)| since <= m + 59 && *m < c) {
         let start = m / big * big;
         match &mut cur {
@@ -772,7 +701,7 @@ pub fn buckets(
     out
 }
 
-fn point(at: u64, secs: u64, m: &Minute, agg: Aggregate) -> Point {
+fn point(at: u64, secs: u64, m: &Row, agg: Aggregate) -> Point {
     Point {
         at,
         secs,
@@ -781,7 +710,7 @@ fn point(at: u64, secs: u64, m: &Minute, agg: Aggregate) -> Point {
     }
 }
 
-fn write_minute(c: &Connection, key: &str, at: u64, m: &Minute) {
+fn write_minute(c: &Connection, key: &str, at: u64, m: &Row) {
     let some = |v: f64| (m.n > 0).then_some(v);
     let _ = c.execute(
         "INSERT OR REPLACE INTO minute
@@ -799,7 +728,7 @@ fn write_minute(c: &Connection, key: &str, at: u64, m: &Minute) {
     );
 }
 
-/// v1.x stored min/mean/max/loss per minute. Each becomes a Minute holding its mean once, so old
+/// v1.x stored min/mean/max/loss per minute. Each becomes a Row holding its mean once, so old
 /// history still graphs (percentiles of it read as the mean) until it ages out of the rollup window.
 /// key, minute, min, mean, max, loss
 type V1Row = (String, i64, Option<f64>, Option<f64>, Option<f64>, f64);
@@ -834,7 +763,7 @@ fn migrate_v1(c: &Connection) {
             Some(mean) => {
                 let mut sketch = Sketch::default();
                 sketch.add(mean);
-                Minute {
+                Row {
                     n: 1,
                     lost: (loss / (1.0 - loss).max(1e-9)).round() as u64,
                     sum: mean,
@@ -843,9 +772,9 @@ fn migrate_v1(c: &Connection) {
                     sketch,
                 }
             }
-            None => Minute {
+            None => Row {
                 lost: 1,
-                ..Minute::default()
+                ..Row::default()
             },
         };
         write_minute(&tx, &key, at as u64, &m);
@@ -902,14 +831,14 @@ mod tests {
         feed(&mut h, 1000, 1300, |t| {
             (t % 10 != 0).then_some((t % 100) as f32)
         });
-        let a = |agg, w| h.aggregate(&probe(), w, agg).value;
+        let a = |agg, w| h.aggregate(&probe(), 1299, w, agg).value;
         assert_eq!(a(Aggregate::Max, 300), Some(99.0));
         assert_eq!(a(Aggregate::Max, 20), Some(99.0));
         assert_eq!(a(Aggregate::Max, 5), Some(99.0));
         assert_eq!(a(Aggregate::P50, 300), Some(49.0));
         assert_eq!(a(Aggregate::P95, 300), Some(95.0));
         assert_eq!(a(Aggregate::Avg, 10), Some(95.0));
-        let loss = h.aggregate(&probe(), 300, Aggregate::P50).loss;
+        let loss = h.aggregate(&probe(), 1299, 300, Aggregate::P50).loss;
         assert!((loss - 0.1).abs() < 1e-6);
     }
 
@@ -918,7 +847,7 @@ mod tests {
         let mut h = History::open(None, limits(15, 7));
         feed(&mut h, 0, 600, |_| Some(10.0));
         feed(&mut h, 600, 630, |t| (t % 2 == 0).then_some(80.0));
-        let s = h.stat(&probe(), 30);
+        let s = h.now(&probe(), 629).unwrap();
         assert!((s.loss - 0.5).abs() < 0.01, "{s:?}");
         assert_eq!(s.rtt_ms, Some(80.0));
         assert_eq!(s.baseline_ms, Some(10.0));

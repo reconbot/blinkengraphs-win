@@ -31,6 +31,7 @@ fn main() {
                 &c.tray,
                 24,
                 render::Taskbar::Dark,
+                model::now(),
             ));
         }
         std::hint::black_box(meters::strip(
@@ -40,6 +41,7 @@ fn main() {
             1.0,
             None,
             render::Taskbar::Dark,
+            model::now(),
         ));
         drawn += 1;
     }

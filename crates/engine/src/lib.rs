@@ -143,17 +143,25 @@ fn adapter(c: &Config) -> AdapterChoice {
     }
 }
 
-/// The Verdict for what History holds now plus what the OS and network checks report
-/// (spec `rules/verdict.md` inputs): recent Probe stats, the last Sample, the upload peak.
-pub fn diagnose(h: &History, net: &Network) -> Vec<Finding> {
-    let probes: Vec<(Probe, ProbeStat)> = h
+/// The Verdict for what History holds at `now` plus what the OS and network checks report
+/// (spec `rules/verdict.md` inputs): Probe stats in `order`, the last Sample, the upload peak.
+/// `order` is Probe Group order, so a tie names the Target listed first; Probes absent from
+/// it follow. Probes with an empty window have no stats and are left out.
+pub fn diagnose(h: &History, net: &Network, now: u64, order: &[Probe]) -> Vec<Finding> {
+    let mut probes: Vec<(Probe, ProbeStat)> = h
         .probes()
         .into_iter()
-        .map(|p| {
-            let st = h.now(&p);
-            (p, st)
+        .filter_map(|p| {
+            let st = h.now(&p, now)?;
+            Some((p, st))
         })
         .collect();
+    probes.sort_by_key(|(p, _)| {
+        (
+            order.iter().position(|o| o == p).unwrap_or(usize::MAX),
+            p.to_string(),
+        )
+    });
     let peak = h
         .recent(&history::Key::Metric(Metric::NetUp), usize::MAX)
         .into_iter()
@@ -166,7 +174,20 @@ pub fn diagnose(h: &History, net: &Network) -> Vec<Finding> {
         path_up: net.path_up,
         via_vpn: net.via_vpn,
         captive_portal: net.captive_portal,
+        since_pause_s: None,
+        window_s: h.window_s(),
     })
+}
+
+/// Every Probe in Probe Group order.
+pub fn probe_order(c: &Config) -> Vec<Probe> {
+    let mut out: Vec<Probe> = Vec::new();
+    for p in groups(c).into_iter().flat_map(|g| g.probes) {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 fn run<S: Sensors>(m: &mut Monitor<S>, commands: Receiver<Command>, wake: impl Fn()) {
@@ -292,7 +313,7 @@ impl<S: Sensors> Monitor<S> {
         if let Some(a) = adapters {
             s.adapters = a;
         }
-        s.findings = diagnose(&s.history, &net);
+        s.findings = diagnose(&s.history, &net, at, &probe_order(&self.config));
         s.sample_count += 1;
         true
     }
