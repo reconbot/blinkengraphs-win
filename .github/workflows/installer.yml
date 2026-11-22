@@ -39,14 +39,14 @@ jobs:
             @{ name = 'per-machine'; args = 'ALLUSERS=1'; dir = "$env:ProgramFiles\blinkengraphs"; run = 'HKLM:' }
           )
           foreach ($c in $cases) {
-            Msi "/i `"$msi`" /qn /l*v msi.log $($c.args)"
+            Msi "/i `"$msi`" /qn /norestart /l*v msi.log $($c.args)"
             if (-not (Test-Path "$($c.dir)\blinkengraphs.exe")) {
               Select-String -Path msi.log -Pattern 'APPLICATIONFOLDER|WixPerUserFolder|WixPerMachineFolder|ALLUSERS' | Select-Object -Last 15
               Get-ChildItem $env:LOCALAPPDATA, $env:ProgramFiles -Recurse -Filter blinkengraphs.exe -ErrorAction SilentlyContinue | ForEach-Object { "found: $($_.FullName)" }
               throw "$($c.name): exe missing in $($c.dir)"
             }
             $run = Get-ItemPropertyValue "$($c.run)\Software\Microsoft\Windows\CurrentVersion\Run" -Name blinkengraphs
-            Msi "/x `"$msi`" /qn /l*v msi.log $($c.args)"
+            Msi "/x `"$msi`" /qn /norestart /l*v msi.log $($c.args)"
             if (Test-Path "$($c.dir)\blinkengraphs.exe") { throw "$($c.name): uninstall left the exe" }
             "$($c.name): installed to $($c.dir), Run = $run, uninstalled" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           }
@@ -54,7 +54,7 @@ jobs:
         shell: pwsh
         run: |
           installer/gui-test.ps1 -Msi (Resolve-Path dist/blinkengraphs-x64.msi).Path -Out shots
-          Start-Process msiexec -ArgumentList "/x `"$((Resolve-Path dist/blinkengraphs-x64.msi).Path)`" /qn" -Wait
+          Start-Process msiexec -ArgumentList "/x `"$((Resolve-Path dist/blinkengraphs-x64.msi).Path)`" /qn /norestart" -Wait
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
