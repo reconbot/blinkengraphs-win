@@ -1,0 +1,109 @@
+name: installer
+on:
+  pull_request:
+    paths: [installer/**, .github/workflows/installer.yml]
+  push:
+    branches: [main]
+    paths: [installer/**, .github/workflows/installer.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: installer
+      - run: cargo build --release -p blinkengraphs
+      - name: build MSI
+        shell: bash
+        run: installer/build.sh x64 target/release/blinkengraphs.exe dist
+      - name: headless installs (per-user and per-machine), then uninstalls
+        shell: pwsh
+        run: |
+          $msi = (Resolve-Path dist/blinkengraphs-x64.msi).Path
+          function Msi([string]$a) {
+            $p = Start-Process msiexec -ArgumentList $a -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content msi.log -Tail 60 -ErrorAction SilentlyContinue; throw "msiexec $a exited $($p.ExitCode)" }
+          }
+          $cases = @(
+            @{ name = 'per-user'; args = 'MSIINSTALLPERUSER=1 ALLUSERS=2'; dir = "$env:LOCALAPPDATA\Programs\blinkengraphs"; run = 'HKCU:' },
+            @{ name = 'per-machine'; args = 'ALLUSERS=1'; dir = "$env:ProgramFiles\blinkengraphs"; run = 'HKLM:' }
+          )
+          foreach ($c in $cases) {
+            Msi "/i `"$msi`" /qn /l*v msi.log $($c.args)"
+            if (-not (Test-Path "$($c.dir)\blinkengraphs.exe")) { Get-Content msi.log -Tail 60; throw "$($c.name): exe missing in $($c.dir)" }
+            $run = Get-ItemPropertyValue "$($c.run)\Software\Microsoft\Windows\CurrentVersion\Run" -Name blinkengraphs
+            Msi "/x `"$msi`" /qn /l*v msi.log $($c.args)"
+            if (Test-Path "$($c.dir)\blinkengraphs.exe") { throw "$($c.name): uninstall left the exe" }
+            "$($c.name): installed to $($c.dir), Run = $run, uninstalled" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+          }
+      - name: GUI install, screenshotting each dialog
+        shell: pwsh
+        run: |
+          installer/gui-test.ps1 -Msi (Resolve-Path dist/blinkengraphs-x64.msi).Path -Out shots
+          Start-Process msiexec -ArgumentList "/x `"$((Resolve-Path dist/blinkengraphs-x64.msi).Path)`" /qn" -Wait
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: installer-screenshots
+          path: shots/
+          if-no-files-found: ignore
+
+  publish:
+    needs: test
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: installer-screenshots
+          path: shots
+        continue-on-error: true
+      - name: Push to ci-screenshots branch
+        id: push
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          ls shots/*.png >/dev/null 2>&1 || { echo "none=true" >> "$GITHUB_OUTPUT"; exit 0; }
+          prefix="https://raw.githubusercontent.com/${{ github.repository }}/ci-screenshots/$SHA"
+          # The screenshots workflow pushes to the same branch; retry on a lost race.
+          for attempt in 1 2 3 4 5; do
+            rm -rf pub && git init -q pub && cd pub
+            git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
+            git fetch -q --depth 1 origin ci-screenshots && git checkout -q FETCH_HEAD || git checkout -q --orphan ci-screenshots
+            mkdir -p "$SHA" && cp ../shots/*.png "$SHA/" && git add "$SHA"
+            git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -qm "installer screenshots $SHA"
+            git push -q origin HEAD:ci-screenshots && break
+            cd .. && sleep $((attempt * 5))
+          done
+          cd "$GITHUB_WORKSPACE"
+          { echo "Clicked through by CI with UI Automation (Just me path)."; echo
+            for f in shots/*.png; do n=$(basename "$f"); echo "**${n%.png}**"; echo; echo "![$n]($prefix/$n)"; echo; done
+          } > body.md
+          { echo "## Installer screenshots"; cat body.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: github.event_name == 'pull_request' && steps.push.outputs.none != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const marker = '<!-- blinkengraphs-installer -->';
+            const body = `${marker}\n## Installer (${context.payload.pull_request.head.sha.slice(0, 7)})\n\n` +
+              require('fs').readFileSync('body.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
