@@ -34,6 +34,7 @@ jobs:
           function Msi([string]$a) {
             # -Wait would also wait for descendants, such as the app Restart Manager relaunches.
             $p = Start-Process msiexec -ArgumentList $a -PassThru
+            $null = $p.Handle  # ExitCode stays empty unless the handle is opened before exit
             $p.WaitForExit()
             if ($p.ExitCode -ne 0) { Get-Content msi.log -Tail 60 -ErrorAction SilentlyContinue; throw "msiexec $a exited $($p.ExitCode)" }
           }
@@ -65,6 +66,7 @@ jobs:
           function Msi([string]$a) {
             # -Wait would also wait for descendants, such as the app Restart Manager relaunches.
             $p = Start-Process msiexec -ArgumentList $a -PassThru
+            $null = $p.Handle  # ExitCode stays empty unless the handle is opened before exit
             $p.WaitForExit()
             if ($p.ExitCode -ne 0) { Get-Content msi.log -Tail 60 -ErrorAction SilentlyContinue; throw "msiexec $a exited $($p.ExitCode)" }
           }
