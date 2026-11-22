@@ -116,7 +116,7 @@ fn value_text(section: Section, h: &History, config: &Config, shown: &[Readout])
             (true, Some(r)) if st.loss > 0.0 && shown.contains(&Readout::Ping(Ping::Loss)) => {
                 format!("{r:.0}ms {loss}")
             }
-            (true, Some(r)) => format!("{r:.0} ms"),
+            (true, Some(r)) => model::rtt_text(r as f64),
         };
     }
     let metrics = SectionConfig::metrics(shown);
@@ -238,7 +238,7 @@ pub fn tooltip(
             let v = config.probe_view(&config.primary);
             let rtt = st
                 .value
-                .map(|r| format!("{} {r:.0} ms", v.aggregate.label()))
+                .map(|r| format!("{} {}", v.aggregate.label(), model::rtt_text(r as f64)))
                 .unwrap_or("no reply".into());
             format!(
                 "{} {rtt}  {:.0}% loss over {}",

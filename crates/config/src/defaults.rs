@@ -60,7 +60,10 @@ pub struct Defaults {
 pub struct PublicAddressDefaults {
     pub dns_name: String,
     pub dns_server: String,
-    pub https_url: String,
+    /// One URL per IP version; each host has addresses of that version only, so no platform
+    /// pins the address family (spec `rules/public-address.md`).
+    pub https_url_ipv4: String,
+    pub https_url_ipv6: String,
     pub refresh_s: u64,
 }
 

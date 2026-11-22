@@ -420,3 +420,172 @@ fn fixtures_match_the_spec_scenarios() {
         assert_eq!(got, want, "fixtures/scenarios/{}", s.name);
     }
 }
+
+#[test]
+fn history_timing() {
+    use std::time::Duration;
+    for c in load("vectors/history/timing.json")["cases"]
+        .as_array()
+        .unwrap()
+    {
+        let start = c["start"].as_f64().unwrap();
+        let interval = Duration::from_secs_f64(c["interval_s"].as_f64().unwrap());
+        let (mut due, mut end) = (0.0f64, 0.0f64);
+        for (d, want) in c["durations_s"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(c["expected"].as_array().unwrap())
+        {
+            let begin = due.max(end);
+            let at = (start + begin).floor() as u64;
+            assert!(
+                (start + begin - want["start"].as_f64().unwrap()).abs() < 1e-6,
+                "{}: round at {begin}",
+                c["name"]
+            );
+            assert_eq!(at, want["at"].as_u64().unwrap(), "{}", c["name"]);
+            end = begin + d.as_f64().unwrap();
+            due = probe::next_round(interval, Duration::from_secs_f64(begin)).as_secs_f64();
+        }
+    }
+}
+
+#[test]
+fn history_minutes() {
+    let probe = icmp_1111();
+    let key = history::Key::Probe(probe.clone());
+    for (i, c) in load("vectors/history/minutes.json")["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        let db = std::env::temp_dir().join(format!(
+            "bg-conformance-minutes-{}-{i}.db",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&db);
+        let timeout = c["max_timeout_ms"].as_u64().unwrap();
+        let mut h = history::History::open(
+            Some(&db),
+            history::Limits {
+                minute_grace_s: timeout.div_ceil(1000) + 1,
+                ..limits()
+            },
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for (at, want) in c["arrivals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(c["expected"].as_array().unwrap())
+        {
+            h.record_probe(&model::ProbeResult {
+                probe: probe.clone(),
+                at: at.as_u64().unwrap(),
+                rtt_ms: Some(1.0),
+            });
+            let now: Vec<u64> = h
+                .minutes(&key, 0, u64::MAX / 2)
+                .into_iter()
+                .map(|(m, _)| m)
+                .filter(|m| seen.insert(*m))
+                .collect();
+            assert_eq!(json!(now), *want, "{} after {at}", c["name"]);
+        }
+        // Every arrival in a written minute, late ones included, is counted there.
+        let stored = h.minutes(&key, 0, u64::MAX / 2);
+        let n: u64 = stored.iter().map(|(_, m)| m.n).sum();
+        let due = c["arrivals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| {
+                stored
+                    .iter()
+                    .any(|(m, _)| a.as_u64().unwrap() / 60 * 60 == *m)
+            })
+            .count();
+        assert_eq!(n as usize, due, "{}", c["name"]);
+        drop(h);
+        let _ = fs::remove_file(&db);
+    }
+}
+
+#[test]
+fn history_ranges() {
+    for r in load("vectors/history/ranges.json")["ranges"]
+        .as_array()
+        .unwrap()
+    {
+        let w = history::bucket_width(r["span_s"].as_u64().unwrap());
+        assert_eq!(w, r["ram_bucket_s"].as_u64().unwrap(), "{}", r["range"]);
+        assert_eq!(
+            w.div_ceil(60) * 60,
+            r["storage_bucket_s"].as_u64().unwrap(),
+            "{}",
+            r["range"]
+        );
+    }
+}
+
+#[test]
+fn history_buckets() {
+    let v = load("vectors/history/buckets.json");
+    let ram: Vec<(u64, Option<f32>)> = v["ram"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["at"].as_u64().unwrap(), opt(&r["v"])))
+        .collect();
+    let stored: Vec<(u64, history::Minute)> = v["stored"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let mut vals =
+                vec![m["max"].as_f64().map(|x| x as f32); m["n"].as_u64().unwrap() as usize];
+            vals.extend(std::iter::repeat_n(
+                None,
+                m["lost"].as_u64().unwrap() as usize,
+            ));
+            (m["m"].as_u64().unwrap(), history::Minute::of(&vals))
+        })
+        .collect();
+    let written = v["written_through"].as_u64().unwrap();
+    for c in v["cases"].as_array().unwrap() {
+        let (now, span) = (c["now"].as_u64().unwrap(), c["span_s"].as_u64().unwrap());
+        let pts = history::buckets(
+            now - span,
+            now,
+            history::bucket_width(span),
+            written,
+            ram.iter().copied(),
+            &stored,
+            model::Aggregate::Max,
+        );
+        let got: Vec<Value> = pts
+            .iter()
+            .map(|p| {
+                json!({"at": p.at, "max": (!p.value.is_nan()).then_some(p.value as f64), "loss": r2(p.loss as f64)})
+            })
+            .collect();
+        assert_eq!(json!(got), c["expected"], "buckets {}", c["range"]);
+    }
+}
+
+#[test]
+fn rtt_whole_ms() {
+    for c in load("vectors/rtt/whole-ms.json")["cases"]
+        .as_array()
+        .unwrap()
+    {
+        let d = std::time::Duration::from_secs_f64(c["measured_ms"].as_f64().unwrap() / 1000.0);
+        assert_eq!(
+            probe::rtt_ms(d) as f64,
+            c["rtt_ms"].as_f64().unwrap(),
+            "{c}"
+        );
+    }
+}

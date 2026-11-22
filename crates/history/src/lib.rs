@@ -42,7 +42,10 @@ impl Key {
 /// One graph bucket starting at `at`: the chosen aggregate (NaN when nothing replied) and the lost fraction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
+    /// The bucket's start.
     pub at: u64,
+    /// The bucket's width: whole minutes from storage, or the RAM bucket width.
+    pub secs: u64,
     pub value: f32,
     pub loss: f32,
 }
@@ -166,6 +169,9 @@ pub struct Limits {
     pub hop_window: usize,
     /// The window "now" means for loss, RTT and the Verdict.
     pub recent_window_s: u64,
+    /// A minute is written once a result `60 + minute_grace_s` past its start arrives, so a
+    /// result that arrives a timeout after its `at` still counts (spec `rules/history.md`).
+    pub minute_grace_s: u64,
 }
 
 #[derive(Default)]
@@ -178,6 +184,7 @@ struct HopTrack {
 pub struct History {
     hop_window: usize,
     recent_secs: u64,
+    minute_grace: u64,
     ram_secs: u64,
     rollup_secs: u64,
     ram: HashMap<Key, VecDeque<(u64, Option<f32>)>>,
@@ -234,7 +241,9 @@ impl History {
         let mut h = Self {
             hop_window: limits.hop_window,
             recent_secs: limits.recent_window_s,
-            ram_secs: limits.ram_minutes as u64 * 60,
+            minute_grace: limits.minute_grace_s,
+            // A minute is written g s after it ends, from RAM, so RAM must outlast that.
+            ram_secs: (limits.ram_minutes as u64 * 60).max(61 + limits.minute_grace_s),
             rollup_secs: limits.rollup_days as u64 * 86_400,
             ram: HashMap::new(),
             hops: HashMap::new(),
@@ -248,17 +257,18 @@ impl History {
         h
     }
 
+    // Due minutes are written before pushing evicts their oldest results.
     pub fn record_sample(&mut self, s: &Sample) {
+        self.maintain(s.at);
         for m in Metric::ALL {
             self.push(Key::Metric(m), s.at, Some(s.get(m) as f32));
         }
         self.last_sample = Some(s.clone());
-        self.maintain(s.at);
     }
 
     pub fn record_probe(&mut self, r: &ProbeResult) {
-        self.push(Key::Probe(r.probe.clone()), r.at, r.rtt_ms);
         self.maintain(r.at);
+        self.push(Key::Probe(r.probe.clone()), r.at, r.rtt_ms);
     }
 
     pub fn record_hop(&mut self, h: &HopResult) {
@@ -335,8 +345,10 @@ impl History {
             } else {
                 1.0 - replies.len() as f32 / window.len() as f32
             },
-            rtt_ms: median(replies),
-            baseline_ms: percentile(all, 0.1),
+            rtt_ms: percentile(replies, 50),
+            // Lowest decile: what the path does when nothing is queued, so a long congestion
+            // episode can't become "normal".
+            baseline_ms: percentile(all, 10),
             jitter_ms: jitter,
         }
     }
@@ -355,9 +367,9 @@ impl History {
         let replies: Vec<f32> = window.iter().flatten().copied().collect();
         Summary {
             value: match agg {
-                Aggregate::P50 => median(replies),
-                Aggregate::P95 => percentile(replies, 0.95),
-                Aggregate::P99 => percentile(replies, 0.99),
+                Aggregate::P50 => percentile(replies, 50),
+                Aggregate::P95 => percentile(replies, 95),
+                Aggregate::P99 => percentile(replies, 99),
                 Aggregate::Avg => (!replies.is_empty())
                     .then(|| replies.iter().sum::<f32>() / replies.len() as f32),
                 Aggregate::Max => replies.into_iter().reduce(f32::max),
@@ -402,6 +414,7 @@ impl History {
     /// Rollups for the part of `[since, until]` older than RAM, then raw RAM points.
     /// `agg` per bucket of `bucket_secs` over `[since, until]`: Minutes from SQLite for the part older
     /// than RAM (buckets rounded up to whole minutes there), exact raw values from RAM after that.
+    /// Graph points for `[since, until]` in buckets of `bucket_secs` (spec `rules/history.md`).
     pub fn series(
         &self,
         key: &Key,
@@ -410,57 +423,28 @@ impl History {
         bucket_secs: u64,
         agg: Aggregate,
     ) -> Vec<Point> {
-        let ram = self.ram.get(key);
-        let ram_start = ram
-            .and_then(|q| q.front())
-            .map(|(t, _)| *t)
-            .unwrap_or(until + 1);
-        let mut out = Vec::new();
-        if since < ram_start {
-            let b = bucket_secs.div_ceil(60).max(1) * 60;
-            let mut cur: Option<(u64, Minute)> = None;
-            for (at, m) in self.minutes(key, since / 60 * 60, ram_start.min(until)) {
-                let start = at / b * b;
-                match &mut cur {
-                    Some((s, acc)) if *s == start => acc.merge(&m),
-                    _ => {
-                        if let Some((s, acc)) = cur.take() {
-                            out.push(point(s, &acc, agg));
-                        }
-                        cur = Some((start, m));
-                    }
-                }
-            }
-            if let Some((s, acc)) = cur {
-                out.push(point(s, &acc, agg));
-            }
-        }
-        if let Some(q) = ram {
-            let b = bucket_secs.max(1);
-            let mut cur: Option<(u64, Vec<Option<f32>>)> = None;
-            let mut flush = |c: Option<(u64, Vec<Option<f32>>)>| {
-                if let Some((s, vs)) = c {
-                    let lost = vs.iter().filter(|v| v.is_none()).count() as f32 / vs.len() as f32;
-                    out.push(Point {
-                        at: s,
-                        value: exact(&vs, agg).map_or(f32::NAN, |v| v as f32),
-                        loss: lost,
-                    });
-                }
-            };
-            for (t, v) in q.iter().filter(|(t, _)| (since..=until).contains(t)) {
-                let start = t / b * b;
-                match &mut cur {
-                    Some((s, vs)) if *s == start => vs.push(*v),
-                    _ => {
-                        flush(cur.take());
-                        cur = Some((start, vec![*v]));
-                    }
-                }
-            }
-            flush(cur);
-        }
-        out
+        let empty = VecDeque::new();
+        let ram = self.ram.get(key).unwrap_or(&empty);
+        // Without a database nothing is written, so RAM serves everything.
+        let c = if self.db.is_some() {
+            self.flushed_minute
+        } else {
+            0
+        };
+        let stored = if since < c {
+            self.minutes(key, since / 60 * 60, c)
+        } else {
+            vec![]
+        };
+        buckets(
+            since,
+            until,
+            bucket_secs,
+            c,
+            ram.iter().copied(),
+            &stored,
+            agg,
+        )
     }
 
     /// Saves what a restart would otherwise lose: the unfinished minute's rollup and the raw RAM samples.
@@ -564,15 +548,18 @@ impl History {
 
     fn push(&mut self, key: Key, at: u64, v: Option<f32>) {
         let q = self.ram.entry(key).or_default();
-        q.push_back((at, v));
-        while q.front().is_some_and(|(t, _)| *t + self.ram_secs < at) {
+        // Rounds of different Probe Groups can report out of order; keep RAM in time order.
+        let i = q.iter().rposition(|(t, _)| *t <= at).map_or(0, |i| i + 1);
+        q.insert(i, (at, v));
+        // Keep at + ram > newest: exactly `ram` back is gone (spec `rules/history.md`, RAM).
+        while q.front().is_some_and(|(t, _)| *t + self.ram_secs <= at) {
             q.pop_front();
         }
     }
 
-    /// Writes one Rollup per key for every whole minute not yet flushed.
+    /// Writes one Rollup per key for every minute that can get no more results.
     fn maintain(&mut self, now: u64) {
-        let minute = now / 60 * 60;
+        let minute = now.saturating_sub(self.minute_grace) / 60 * 60;
         if self.flushed_minute == 0 {
             self.flushed_minute = minute;
             return;
@@ -721,9 +708,74 @@ fn flush_one(c: &Connection, key: &str, at: u64, values: &[Option<f32>]) {
     write_minute(c, key, at, &Minute::of(values));
 }
 
-fn point(at: u64, m: &Minute, agg: Aggregate) -> Point {
+/// A graph's RAM bucket width for a span shown in up to 240 points (spec `rules/history.md`).
+pub fn bucket_width(span_secs: u64) -> u64 {
+    (span_secs / 240).max(1)
+}
+
+/// Graph points (spec `rules/history.md`, "Graph buckets"). `written` is where storage hands
+/// over to RAM: every minute before it is written, none from it on. Stored Minutes before it go
+/// in whole-minute buckets and RAM results from it on in `w`-second buckets, both aligned to
+/// the epoch, so nothing is counted twice or left out.
+pub fn buckets(
+    since: u64,
+    until: u64,
+    w: u64,
+    written: u64,
+    ram: impl Iterator<Item = (u64, Option<f32>)>,
+    stored: &[(u64, Minute)],
+    agg: Aggregate,
+) -> Vec<Point> {
+    let w = w.max(1);
+    let c = written;
+    let mut out = Vec::new();
+    let big = w.div_ceil(60) * 60;
+    let mut cur: Option<(u64, Minute)> = None;
+    for (m, minute) in stored.iter().filter(|(m, _)| since <= m + 59 && *m < c) {
+        let start = m / big * big;
+        match &mut cur {
+            Some((s, acc)) if *s == start => acc.merge(minute),
+            _ => {
+                if let Some((s, acc)) = cur.take() {
+                    out.push(point(s, big, &acc, agg));
+                }
+                cur = Some((start, minute.clone()));
+            }
+        }
+    }
+    if let Some((s, acc)) = cur {
+        out.push(point(s, big, &acc, agg));
+    }
+    let mut cur: Option<(u64, Vec<Option<f32>>)> = None;
+    let mut flush = |c: Option<(u64, Vec<Option<f32>>)>| {
+        if let Some((s, vs)) = c {
+            let lost = vs.iter().filter(|v| v.is_none()).count() as f32 / vs.len() as f32;
+            out.push(Point {
+                at: s,
+                secs: w,
+                value: exact(&vs, agg).map_or(f32::NAN, |v| v as f32),
+                loss: lost,
+            });
+        }
+    };
+    for (t, v) in ram.filter(|(t, _)| (since.max(c)..=until).contains(t)) {
+        let start = t / w * w;
+        match &mut cur {
+            Some((s, vs)) if *s == start => vs.push(v),
+            _ => {
+                flush(cur.take());
+                cur = Some((start, vec![v]));
+            }
+        }
+    }
+    flush(cur);
+    out
+}
+
+fn point(at: u64, secs: u64, m: &Minute, agg: Aggregate) -> Point {
     Point {
         at,
+        secs,
         value: m.value(agg).map_or(f32::NAN, |v| v as f32),
         loss: m.loss(),
     }
@@ -802,21 +854,14 @@ fn migrate_v1(c: &Connection) {
     let _ = tx.commit();
 }
 
-/// Lowest-decile RTT: what the path does when nothing is queued, so a long congestion episode can't become "normal".
-fn percentile(mut v: Vec<f32>, p: f32) -> Option<f32> {
+/// The X-th percentile of `v`: sorted, the element at `⌊(n − 1) × X / 100⌋` in integer
+/// arithmetic, the one rank every percentile uses (spec `rules/probe-stats.md`).
+fn percentile(mut v: Vec<f32>, x: usize) -> Option<f32> {
     if v.is_empty() {
         return None;
     }
     v.sort_by(f32::total_cmp);
-    Some(v[((v.len() - 1) as f32 * p) as usize])
-}
-
-fn median(mut v: Vec<f32>) -> Option<f32> {
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(f32::total_cmp);
-    Some(v[v.len() / 2])
+    Some(v[(v.len() - 1) * x / 100])
 }
 
 #[cfg(test)]
@@ -830,6 +875,7 @@ mod tests {
             rollup_days,
             hop_window: 60,
             recent_window_s: 30,
+            minute_grace_s: 2,
         }
     }
 
@@ -860,7 +906,7 @@ mod tests {
         assert_eq!(a(Aggregate::Max, 300), Some(99.0));
         assert_eq!(a(Aggregate::Max, 20), Some(99.0));
         assert_eq!(a(Aggregate::Max, 5), Some(99.0));
-        assert_eq!(a(Aggregate::P50, 300), Some(51.0));
+        assert_eq!(a(Aggregate::P50, 300), Some(49.0));
         assert_eq!(a(Aggregate::P95, 300), Some(95.0));
         assert_eq!(a(Aggregate::Avg, 10), Some(95.0));
         let loss = h.aggregate(&probe(), 300, Aggregate::P50).loss;
@@ -882,7 +928,8 @@ mod tests {
     fn ram_is_bounded() {
         let mut h = History::open(None, limits(1, 7));
         feed(&mut h, 0, 500, |_| Some(1.0));
-        assert!(h.recent(&Key::Probe(probe()), 1000).len() <= 61);
+        // One minute is raised to 61 + grace s, so minutes are written before eviction.
+        assert_eq!(h.recent(&Key::Probe(probe()), 1000).len(), 63);
     }
 
     #[test]
