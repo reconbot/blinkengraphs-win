@@ -14,6 +14,8 @@ pub enum FaultDomain {
     Offline,
     /// The VPN tunnel, or its exit, that the traffic goes through.
     Vpn,
+    /// A sign-in page holds back the internet.
+    CaptivePortal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -42,6 +44,8 @@ pub struct Input<'a> {
     /// Whether the traffic goes through a VPN tunnel. Findings that would blame the ISP or
     /// ping filtering then name the VPN. Windows doesn't detect this yet and passes false.
     pub via_vpn: bool,
+    /// Whether a sign-in page holds back the internet (spec `rules/verdict.md`, Captive Portal).
+    pub captive_portal: bool,
 }
 
 const LOSS_WARN: f32 = 0.05;
@@ -69,6 +73,7 @@ pub fn from_history(h: &history::History, path_up: bool) -> Vec<Finding> {
         upload_peak_bps: peak,
         path_up,
         via_vpn: false,
+        captive_portal: false,
     })
 }
 
@@ -138,6 +143,14 @@ fn network(input: &Input) -> Vec<Finding> {
             FaultDomain::Lan,
             format!("Local network unstable: gateway losing {}", pct(gw_loss)),
         ));
+    }
+    // A portal explains Internet loss and hijacked DNS, so nothing after this would add anything.
+    if input.captive_portal {
+        out.push(warn(
+            FaultDomain::CaptivePortal,
+            "Sign-in page is blocking the internet".into(),
+        ));
+        return out;
     }
 
     // Through a VPN, what would blame the ISP or ping filtering is the tunnel or its exit.
@@ -417,6 +430,7 @@ mod tests {
             upload_peak_bps: 5e6,
             path_up: true,
             via_vpn: false,
+            captive_portal: false,
         })
     }
 
@@ -531,6 +545,7 @@ mod tests {
             upload_peak_bps: 0.0,
             path_up: false,
             via_vpn: false,
+            captive_portal: false,
         });
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].domain, FaultDomain::Offline);
@@ -594,6 +609,7 @@ mod tests {
             upload_peak_bps: 5e6,
             path_up: true,
             via_vpn: true,
+            captive_portal: false,
         })
     }
 

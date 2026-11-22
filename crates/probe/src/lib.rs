@@ -3,6 +3,7 @@
 mod dns;
 pub mod names;
 mod net;
+pub mod public;
 mod resolve;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod trace;
