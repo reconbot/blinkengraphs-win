@@ -31,6 +31,7 @@ fn group(probes: Vec<Probe>, traces: Vec<Probe>) -> ProbeGroup {
         interval: Duration::from_millis(100),
         probes,
         traces,
+        link: None,
     }
 }
 

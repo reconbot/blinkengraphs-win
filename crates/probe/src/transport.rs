@@ -3,7 +3,7 @@
 
 use crate::net;
 pub use crate::trace::Hop;
-use model::Target;
+use model::{Link, Target};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -21,17 +21,33 @@ pub struct Echo {
 pub trait Transport: Send + Sync + 'static {
     /// Whether the OS has a route for this IP version.
     fn family_up(&self, v6: bool) -> bool;
+    /// Whether `via` routes `to`. A Probe goes out on a Link only if it does (spec
+    /// `rules/probe-stats.md`), so a split-tunnel VPN measures only Targets inside it.
+    fn routes(&self, via: &Link, to: IpAddr) -> bool;
     /// The address for a Target; `Target::Addr` needs no lookup.
     fn lookup(&self, target: &Target) -> Option<IpAddr>;
-    fn tcp(&self, to: SocketAddr, timeout: Duration) -> Option<Duration>;
-    fn udp(&self, to: SocketAddr, timeout: Duration) -> Option<Duration>;
-    fn dns(&self, to: SocketAddr, timeout: Duration, name: &str) -> Option<Duration>;
+    /// Each send below leaves from `via`'s interface, or wherever the OS routes it when `None`.
+    fn tcp(&self, via: Option<&Link>, to: SocketAddr, timeout: Duration) -> Option<Duration>;
+    fn udp(&self, via: Option<&Link>, to: SocketAddr, timeout: Duration) -> Option<Duration>;
+    fn dns(
+        &self,
+        via: Option<&Link>,
+        to: SocketAddr,
+        timeout: Duration,
+        name: &str,
+    ) -> Option<Duration>;
     /// Every `(destination, ttl)` echo at once; `None` where nothing came back. The whole
     /// answer is `None` where ICMP can't be sent at all, so those Probes are skipped.
-    fn echo(&self, requests: &[(IpAddr, u8)], timeout: Duration) -> Option<Vec<Option<Echo>>>;
+    fn echo(
+        &self,
+        via: Option<&Link>,
+        requests: &[(IpAddr, u8)],
+        timeout: Duration,
+    ) -> Option<Vec<Option<Echo>>>;
     /// A TCP Hop Trace up to `max_ttl`, or `None` where it can't run (ADR 0006).
     fn tcp_trace(
         &self,
+        via: Option<&Link>,
         to: Ipv4Addr,
         port: u16,
         max_ttl: u8,
@@ -61,26 +77,47 @@ impl Transport for SystemTransport {
         crate::family_up(v6)
     }
 
+    fn routes(&self, via: &Link, to: IpAddr) -> bool {
+        #[cfg(windows)]
+        return crate::win::routes(via, to);
+        #[cfg(not(windows))]
+        {
+            let _ = (via, to);
+            true
+        }
+    }
+
     fn lookup(&self, target: &Target) -> Option<IpAddr> {
         crate::resolve::lookup(target)
     }
 
-    fn tcp(&self, to: SocketAddr, timeout: Duration) -> Option<Duration> {
-        net::tcp(to, timeout)
+    fn tcp(&self, via: Option<&Link>, to: SocketAddr, timeout: Duration) -> Option<Duration> {
+        net::tcp(via, to, timeout)
     }
 
-    fn udp(&self, to: SocketAddr, timeout: Duration) -> Option<Duration> {
-        net::udp(to, timeout)
+    fn udp(&self, via: Option<&Link>, to: SocketAddr, timeout: Duration) -> Option<Duration> {
+        net::udp(via, to, timeout)
     }
 
-    fn dns(&self, to: SocketAddr, timeout: Duration, name: &str) -> Option<Duration> {
-        net::dns(to, timeout, name)
+    fn dns(
+        &self,
+        via: Option<&Link>,
+        to: SocketAddr,
+        timeout: Duration,
+        name: &str,
+    ) -> Option<Duration> {
+        net::dns(via, to, timeout, name)
     }
 
-    fn echo(&self, requests: &[(IpAddr, u8)], timeout: Duration) -> Option<Vec<Option<Echo>>> {
+    fn echo(
+        &self,
+        via: Option<&Link>,
+        requests: &[(IpAddr, u8)],
+        timeout: Duration,
+    ) -> Option<Vec<Option<Echo>>> {
         #[cfg(windows)]
         return self.icmp.as_ref().map(|icmp| {
-            icmp.batch(requests, timeout)
+            icmp.batch(via, requests, timeout)
                 .into_iter()
                 .map(|r| {
                     r.map(|r| Echo {
@@ -93,23 +130,24 @@ impl Transport for SystemTransport {
         });
         #[cfg(not(windows))]
         {
-            let _ = (requests, timeout);
+            let _ = (via, requests, timeout);
             None
         }
     }
 
     fn tcp_trace(
         &self,
+        via: Option<&Link>,
         to: Ipv4Addr,
         port: u16,
         max_ttl: u8,
         timeout: Duration,
     ) -> Option<Vec<Hop>> {
         #[cfg(windows)]
-        return Some(crate::win::tcp_trace(to, port, max_ttl, timeout));
+        return Some(crate::win::tcp_trace(via, to, port, max_ttl, timeout));
         #[cfg(not(windows))]
         {
-            let _ = (to, port, max_ttl, timeout);
+            let _ = (via, to, port, max_ttl, timeout);
             None
         }
     }

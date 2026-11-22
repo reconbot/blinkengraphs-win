@@ -1,4 +1,5 @@
 use crate::dns;
+use model::Link;
 use std::{
     hash::{BuildHasher, RandomState},
     io::ErrorKind,
@@ -8,15 +9,17 @@ use std::{
 
 /// A refused connection still proves the host answered, so it counts as a reply.
 #[cfg(windows)]
-pub fn tcp(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
-    match crate::win::tcp_connect(addr, timeout, None) {
+pub fn tcp(via: Option<&Link>, addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+    match crate::win::tcp_connect(via, addr, timeout, None) {
         crate::win::Connect::Reply(d) => Some(d),
         _ => None,
     }
 }
 
+/// Off Windows a socket follows the routing table; binding to a device needs root.
 #[cfg(not(windows))]
-pub fn tcp(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+pub fn tcp(via: Option<&Link>, addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+    let _ = via;
     let start = Instant::now();
     match std::net::TcpStream::connect_timeout(&addr, timeout) {
         Ok(_) => Some(start.elapsed()),
@@ -28,8 +31,8 @@ pub fn tcp(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
 /// On a connected UDP socket an ICMP port-unreachable surfaces as a reset (Windows) or refused (Unix)
 /// on the next receive, which proves the host is up. Silence is loss: an open port that never replies
 /// is indistinguishable from a dropped packet.
-pub fn udp(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
-    let socket = bound(addr)?;
+pub fn udp(via: Option<&Link>, addr: SocketAddr, timeout: Duration) -> Option<Duration> {
+    let socket = bound(via, addr)?;
     socket.connect(addr).ok()?;
     socket.set_read_timeout(Some(timeout)).ok()?;
     let start = Instant::now();
@@ -49,16 +52,29 @@ pub fn udp(addr: SocketAddr, timeout: Duration) -> Option<Duration> {
     }
 }
 
-fn bound(addr: SocketAddr) -> Option<UdpSocket> {
+fn bound(via: Option<&Link>, addr: SocketAddr) -> Option<UdpSocket> {
     let local: IpAddr = match addr {
         SocketAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
         SocketAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
     };
-    UdpSocket::bind((local, 0)).ok()
+    let socket = UdpSocket::bind((local, 0)).ok()?;
+    #[cfg(windows)]
+    if let Some(link) = via {
+        use std::os::windows::io::AsRawSocket;
+        crate::win::unicast_if(socket.as_raw_socket() as _, addr.is_ipv6(), link).then_some(())?;
+    }
+    #[cfg(not(windows))]
+    let _ = via;
+    Some(socket)
 }
 
-pub fn dns(addr: SocketAddr, timeout: Duration, name: &str) -> Option<Duration> {
-    let socket = bound(addr)?;
+pub fn dns(
+    via: Option<&Link>,
+    addr: SocketAddr,
+    timeout: Duration,
+    name: &str,
+) -> Option<Duration> {
+    let socket = bound(via, addr)?;
     socket.connect(addr).ok()?;
     let id = random_u16();
     let query = dns::encode_query(id, name);
@@ -109,7 +125,7 @@ mod tests {
             let (n, from) = server.recv_from(&mut buf).unwrap();
             server.send_to(&buf[..n], from).unwrap();
         });
-        assert!(udp(addr, T).is_some());
+        assert!(udp(None, addr, T).is_some());
         echo.join().unwrap();
     }
 
@@ -120,7 +136,7 @@ mod tests {
             .local_addr()
             .unwrap();
         assert!(
-            udp(closed, T).is_some(),
+            udp(None, closed, T).is_some(),
             "port unreachable should prove the host answered"
         );
     }
@@ -128,7 +144,7 @@ mod tests {
     #[test]
     fn tcp_reply_from_listener() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        assert!(tcp(l.local_addr().unwrap(), T).is_some());
+        assert!(tcp(None, l.local_addr().unwrap(), T).is_some());
     }
 
     #[test]
@@ -137,7 +153,7 @@ mod tests {
             .unwrap()
             .local_addr()
             .unwrap();
-        assert!(tcp(addr, T).is_some());
+        assert!(tcp(None, addr, T).is_some());
     }
 
     #[test]
@@ -154,7 +170,7 @@ mod tests {
             buf[2] |= 0x80;
             server.send_to(&buf[..n], from).unwrap();
         });
-        assert!(dns(addr, T, "cloudflare.com").is_some());
+        assert!(dns(None, addr, T, "cloudflare.com").is_some());
         echo.join().unwrap();
     }
 
@@ -163,6 +179,7 @@ mod tests {
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
         assert!(
             dns(
+                None,
                 server.local_addr().unwrap(),
                 Duration::from_millis(100),
                 "cloudflare.com"

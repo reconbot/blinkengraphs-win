@@ -165,6 +165,7 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
                     findings: &findings,
                     processes: &processes,
                     adapters: &adapters,
+                    links: &[],
                     now: NOW,
                     elevated: false,
                     config_error: None,

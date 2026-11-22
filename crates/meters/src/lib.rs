@@ -35,7 +35,11 @@ fn series(
         // side by side. The newest seconds' Rounds may still be waiting for replies, so the
         // Meter ends where every Round has reported: a timeout plus a second.
         let end = now.saturating_sub(h.grace_s());
-        let raw = h.by_second(&Key::Probe(config.primary.clone()), end, n);
+        let raw = h.by_second(
+            &Key::Probe(h.followed().cloned(), config.primary.clone()),
+            end,
+            n,
+        );
         let latency = shown.contains(&Readout::Ping(Ping::Latency));
         let loss = shown.contains(&Readout::Ping(Ping::Loss));
         if !latency {

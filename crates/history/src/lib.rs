@@ -8,7 +8,7 @@ pub use range::{GraphPoint, Range, State};
 pub use sketch::{Sketch, index as sketch_index, rep as sketch_rep};
 
 use archive::{Archive, written};
-use model::{Aggregate, HopResult, Metric, Probe, ProbeResult, ProbeStat, Sample};
+use model::{Aggregate, HopResult, LinkId, Metric, Probe, ProbeResult, ProbeStat, Sample};
 use pause::{Pause, paused_s};
 use range::Sources;
 use rusqlite::Connection;
@@ -23,14 +23,17 @@ use store::Store;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Metric(Metric),
-    Probe(Probe),
+    /// A Probe on one Link; `None` where Links aren't known (tests, fixtures).
+    Probe(Option<LinkId>, Probe),
 }
 
 impl Key {
+    /// Stable across restarts: the Link is named by its NET_LUID and Gateway.
     fn id(&self) -> String {
         match self {
             Key::Metric(m) => format!("metric:{m:?}"),
-            Key::Probe(p) => format!("probe:{p}"),
+            Key::Probe(None, p) => format!("probe:{p}"),
+            Key::Probe(Some(l), p) => format!("probe:{p} on {l}"),
         }
     }
 
@@ -41,11 +44,17 @@ impl Key {
                 .find(|x| format!("{x:?}") == m)
                 .map(Key::Metric);
         }
-        let (protocol, target) = id.strip_prefix("probe:")?.split_once(' ')?;
-        Some(Key::Probe(Probe {
+        let rest = id.strip_prefix("probe:")?;
+        let (probe, link) = match rest.split_once(" on ") {
+            Some((p, l)) => (p, Some(l.parse().ok()?)),
+            None => (rest, None),
+        };
+        let (protocol, target) = probe.split_once(' ')?;
+        let probe = Probe {
             protocol: model::Protocol::try_from(protocol.to_string()).ok()?,
             target: model::Target::from(target.to_string()),
-        }))
+        };
+        Some(Key::Probe(link, probe))
     }
 }
 
@@ -109,7 +118,11 @@ pub struct History {
     limits: Limits,
     raw: HashMap<Key, VecDeque<(u64, Option<f32>)>>,
     pauses: Vec<Pause>,
-    hops: HashMap<Probe, Vec<HopTrack>>,
+    hops: HashMap<(Option<LinkId>, Probe), Vec<HopTrack>>,
+    /// The Followed Adapter's Link, which the Verdict and Meters speak for.
+    followed: Option<LinkId>,
+    /// When the followed Link changed, for markers on Raw ranges.
+    link_changes: VecDeque<(u64, Option<LinkId>)>,
     last_sample: Option<Sample>,
     store: Store,
     unwritten: Vec<(String, u64, Option<f32>)>,
@@ -166,6 +179,8 @@ impl History {
             raw: HashMap::new(),
             pauses: store.load_pauses(since as f64),
             hops: HashMap::new(),
+            followed: None,
+            link_changes: VecDeque::new(),
             last_sample: None,
             unwritten: Vec::new(),
             unwritten_pauses: Vec::new(),
@@ -253,11 +268,52 @@ impl History {
 
     pub fn record_probe(&mut self, r: &ProbeResult) {
         self.maintain(r.at);
-        self.record(Key::Probe(r.probe.clone()), r.at, r.rtt_ms);
+        self.record(
+            Key::Probe(self.followed.clone(), r.probe.clone()),
+            r.at,
+            r.rtt_ms,
+        );
+    }
+
+    /// One Round's results, measured on `link`.
+    pub fn record_round(
+        &mut self,
+        link: Option<&LinkId>,
+        probes: &[ProbeResult],
+        hops: &[HopResult],
+    ) {
+        for r in probes {
+            self.maintain(r.at);
+            self.record(Key::Probe(link.cloned(), r.probe.clone()), r.at, r.rtt_ms);
+        }
+        for h in hops {
+            self.hop_on(link.cloned(), h);
+        }
+    }
+
+    /// Which Link the Verdict, the Meters and `now` speak for, from `at` on.
+    pub fn set_followed(&mut self, link: Option<LinkId>, at: u64) {
+        if self.link_changes.back().map(|c| &c.1) != Some(&link) {
+            self.link_changes.push_back((at, link.clone()));
+        }
+        self.followed = link;
+    }
+
+    pub fn followed(&self) -> Option<&LinkId> {
+        self.followed.as_ref()
+    }
+
+    /// When the followed Link changed, oldest first, within Raw.
+    pub fn link_changes(&self) -> Vec<(u64, Option<LinkId>)> {
+        self.link_changes.iter().cloned().collect()
     }
 
     pub fn record_hop(&mut self, h: &HopResult) {
-        let track = self.hops.entry(h.trace.clone()).or_default();
+        self.hop_on(self.followed.clone(), h);
+    }
+
+    fn hop_on(&mut self, link: Option<LinkId>, h: &HopResult) {
+        let track = self.hops.entry((link, h.trace.clone())).or_default();
         let i = h.ttl.saturating_sub(1) as usize;
         if track.len() <= i {
             track.resize_with(i + 1, HopTrack::default);
@@ -276,11 +332,21 @@ impl History {
         }
     }
 
+    /// The Probes measured on the followed Link.
     pub fn probes(&self) -> Vec<Probe> {
+        self.series_keys()
+            .into_iter()
+            .filter(|(l, _)| *l == self.followed)
+            .map(|(_, p)| p)
+            .collect()
+    }
+
+    /// Every Probe on every Link that has results in Raw.
+    pub fn series_keys(&self) -> Vec<(Option<LinkId>, Probe)> {
         self.raw
             .keys()
             .filter_map(|k| match k {
-                Key::Probe(p) => Some(p.clone()),
+                Key::Probe(l, p) => Some((l.clone(), p.clone())),
                 Key::Metric(_) => None,
             })
             .collect()
@@ -323,7 +389,12 @@ impl History {
     /// The Probe's stats over the recent window (`Limits::recent_window_s`) back from `now`;
     /// `None` while that window is empty.
     pub fn now(&self, probe: &Probe, now: u64) -> Option<ProbeStat> {
-        let q = self.raw.get(&Key::Probe(probe.clone()))?;
+        self.now_on(self.followed.as_ref(), probe, now)
+    }
+
+    /// As `now`, on any Link.
+    pub fn now_on(&self, link: Option<&LinkId>, probe: &Probe, now: u64) -> Option<ProbeStat> {
+        let q = self.raw.get(&Key::Probe(link.cloned(), probe.clone()))?;
         let results: Vec<_> = q.iter().copied().collect();
         probe_stats(
             &results,
@@ -335,7 +406,19 @@ impl History {
 
     /// One value for `probe` over the `window_secs` back from `now`, with the share of Probes lost.
     pub fn aggregate(&self, probe: &Probe, now: u64, window_secs: u64, agg: Aggregate) -> Summary {
-        let Some(q) = self.raw.get(&Key::Probe(probe.clone())) else {
+        self.aggregate_on(self.followed.as_ref(), probe, now, window_secs, agg)
+    }
+
+    /// As `aggregate`, on any Link.
+    pub fn aggregate_on(
+        &self,
+        link: Option<&LinkId>,
+        probe: &Probe,
+        now: u64,
+        window_secs: u64,
+        agg: Aggregate,
+    ) -> Summary {
+        let Some(q) = self.raw.get(&Key::Probe(link.cloned(), probe.clone())) else {
             return Summary::default();
         };
         let window: Vec<Option<f32>> = q
@@ -371,8 +454,9 @@ impl History {
         self.limits.recent_window_s
     }
 
+    /// The followed Link's Hop rows for `trace`.
     pub fn hops(&self, trace: &Probe) -> Vec<Hop> {
-        let Some(track) = self.hops.get(trace) else {
+        let Some(track) = self.hops.get(&(self.followed.clone(), trace.clone())) else {
             return vec![];
         };
         track
@@ -532,6 +616,10 @@ impl History {
             }
         }
         self.pauses.retain(|p| p.end > keep as f64);
+        // Keep the change that set the oldest Raw's Link, and every later one.
+        while self.link_changes.len() > 1 && self.link_changes[1].0 < keep {
+            self.link_changes.pop_front();
+        }
         if now >= self.raw_written_at + RAW_WRITE_S {
             self.write_raw();
         }
@@ -815,7 +903,7 @@ mod tests {
     }
 
     fn key() -> Key {
-        Key::Probe(probe())
+        Key::Probe(None, probe())
     }
 
     fn feed(h: &mut History, from: u64, to: u64, f: impl Fn(u64) -> Option<f32>) {
@@ -1100,6 +1188,62 @@ mod tests {
             Some(Some(107.0)),
         ];
         assert_eq!(got, want);
+    }
+
+    fn link(luid: u64) -> LinkId {
+        LinkId {
+            luid,
+            gateway: Some("192.168.1.1".parse().unwrap()),
+        }
+    }
+
+    fn on(h: &mut History, l: &LinkId, from: u64, to: u64, rtt: f32) {
+        for t in from..to {
+            let r = ProbeResult {
+                probe: probe(),
+                at: t,
+                rtt_ms: Some(rtt),
+            };
+            h.record_round(Some(l), &[r], &[]);
+        }
+    }
+
+    #[test]
+    fn each_link_keeps_its_own_results_and_the_followed_one_speaks() {
+        let mut h = History::open(None, limits());
+        let (wifi, eth) = (link(1), link(2));
+        on(&mut h, &wifi, 0, 30, 10.0);
+        on(&mut h, &eth, 0, 30, 50.0);
+        h.set_followed(Some(eth.clone()), 29);
+        assert_eq!(h.now(&probe(), 29).unwrap().rtt_ms, Some(50.0));
+        assert_eq!(
+            h.now_on(Some(&wifi), &probe(), 29).unwrap().rtt_ms,
+            Some(10.0)
+        );
+        assert_eq!(h.probes(), [probe()]);
+        let mut all = h.series_keys();
+        all.sort_by_key(|(l, _)| l.clone());
+        assert_eq!(all, [(Some(wifi), probe()), (Some(eth), probe())]);
+    }
+
+    #[test]
+    fn a_link_key_round_trips_through_its_id() {
+        let k = Key::Probe(Some(link(0xabc)), probe());
+        assert_eq!(Key::from_id(&k.id()), Some(k));
+        let k = Key::Probe(None, probe());
+        assert_eq!(Key::from_id(&k.id()), Some(k));
+    }
+
+    #[test]
+    fn followed_link_changes_are_kept_for_markers() {
+        let mut h = History::open(None, limits());
+        h.set_followed(Some(link(1)), 100);
+        h.set_followed(Some(link(1)), 110);
+        h.set_followed(Some(link(2)), 120);
+        assert_eq!(
+            h.link_changes(),
+            [(100, Some(link(1))), (120, Some(link(2)))]
+        );
     }
 
     #[test]

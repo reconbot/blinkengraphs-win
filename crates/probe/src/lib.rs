@@ -31,7 +31,15 @@ pub fn path_up() -> bool {
     family_up(false) || family_up(true)
 }
 
-use model::{HopResult, Probe, ProbeResult, Protocol, Target};
+/// The Links up now. Off Windows none are listed, and every Probe goes where the OS routes it.
+pub fn links() -> Vec<Link> {
+    #[cfg(windows)]
+    return win::links();
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
+use model::{HopResult, Link, LinkId, Probe, ProbeResult, Protocol, Target};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -65,6 +73,8 @@ pub struct ProbeGroup {
     pub interval: Duration,
     pub probes: Vec<Probe>,
     pub traces: Vec<Probe>,
+    /// The Link every Probe leaves from, or `None` to let the OS route each one.
+    pub link: Option<Link>,
 }
 
 /// Everything one Round measured. It arrives whole, once its last Probe ends, so a Round a
@@ -76,6 +86,8 @@ pub struct Round {
     /// Unix seconds when the Round started and when its last Probe ended.
     pub start: f64,
     pub end: f64,
+    /// The Link it was measured on.
+    pub link: Option<LinkId>,
     pub probes: Vec<ProbeResult>,
     pub hops: Vec<HopResult>,
 }
@@ -271,16 +283,24 @@ impl Ticker {
         let start = model::now_f64();
         let at = start as u64;
         let results: Mutex<(Vec<ProbeResult>, Vec<HopResult>)> = Mutex::default();
+        let via = self.group.link.as_ref();
         let mut addrs: HashMap<&Target, Option<IpAddr>> = HashMap::new();
         for p in self.group.probes.iter().chain(&self.group.traces) {
             if !addrs.contains_key(&p.target) {
-                addrs.insert(&p.target, shared.resolve(&p.target));
+                // A Link's Gateway is its own, not the default route's.
+                let addr = match (&p.target, via.and_then(|l| l.id.gateway)) {
+                    (Target::Gateway, Some(g)) => Some(g),
+                    _ => shared.resolve(&p.target),
+                };
+                addrs.insert(&p.target, addr);
             }
         }
-        // A Target whose IP version has no route is skipped: absent, not lost.
+        // A Target whose IP version has no route, or that this Link doesn't route, is
+        // skipped: absent, not lost.
         let reachable = |t: &Target| match addrs[t] {
-            Some(IpAddr::V4(_)) => v4_up,
-            Some(IpAddr::V6(_)) => v6_up,
+            Some(ip) => {
+                (if ip.is_ipv6() { v6_up } else { v4_up }) && via.is_none_or(|l| net.routes(l, ip))
+            }
             None => true,
         };
         let emit_probe = |probe: &Probe, rtt: Option<Duration>| {
@@ -329,9 +349,11 @@ impl Ticker {
                     let rtt = addr.and_then(|ip| {
                         let sa = SocketAddr::new(ip, port);
                         match probe.protocol {
-                            Protocol::Dns => net.dns(sa, timeout, &shared.limits.dns_query_name),
-                            Protocol::Udp(_) => net.udp(sa, timeout),
-                            _ => net.tcp(sa, timeout),
+                            Protocol::Dns => {
+                                net.dns(via, sa, timeout, &shared.limits.dns_query_name)
+                            }
+                            Protocol::Udp(_) => net.udp(via, sa, timeout),
+                            _ => net.tcp(via, sa, timeout),
                         }
                     });
                     emit_probe(probe, rtt);
@@ -348,7 +370,7 @@ impl Ticker {
                 s.spawn(move || {
                     let now = Instant::now();
                     let swept = path.max_ttl(now);
-                    if let Some(hops) = net.tcp_trace(ip, port, swept, timeout) {
+                    if let Some(hops) = net.tcp_trace(via, ip, port, swept, timeout) {
                         emit_hops(trace, path.record(swept, hops, now));
                     }
                 });
@@ -362,6 +384,7 @@ impl Ticker {
                 .collect();
             icmp_tick(
                 net,
+                via,
                 &probes,
                 icmp_paths,
                 &addrs,
@@ -376,6 +399,7 @@ impl Ticker {
                 at,
                 start,
                 end: model::now_f64(),
+                link: self.group.link.as_ref().map(|l| l.id.clone()),
                 probes,
                 hops,
             };
@@ -386,8 +410,10 @@ impl Ticker {
 
 /// ICMP Probes and ICMP Hop Traces go out as one batch, so a trace's TTLs and the Probes
 /// share one timeout instead of queueing.
+#[allow(clippy::too_many_arguments)]
 fn icmp_tick(
     net: &dyn Transport,
+    via: Option<&Link>,
     probes: &[&Probe],
     traces: Vec<(&Probe, &mut PathMemory)>,
     addrs: &HashMap<&Target, Option<IpAddr>>,
@@ -426,7 +452,7 @@ fn icmp_tick(
     if requests.is_empty() && unresolved.is_empty() {
         return;
     }
-    let Some(replies) = net.echo(&requests, timeout) else {
+    let Some(replies) = net.echo(via, &requests, timeout) else {
         return;
     };
     for probe in unresolved {

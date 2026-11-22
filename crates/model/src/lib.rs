@@ -318,6 +318,63 @@ impl std::fmt::Display for Probe {
     }
 }
 
+/// Names a Link: its interface (the adapter's NET_LUID, which survives a restart) and its
+/// Gateway, the IPv4 one, else the IPv6 one, else none (spec `rules/history.md`, Links).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LinkId {
+    pub luid: u64,
+    pub gateway: Option<std::net::IpAddr>,
+}
+
+impl std::fmt::Display for LinkId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.luid)?;
+        match self.gateway {
+            Some(g) => write!(f, "@{g}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::str::FromStr for LinkId {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (luid, gateway) = match s.split_once('@') {
+            Some((l, g)) => (l, Some(g.parse().map_err(|e| format!("{e}"))?)),
+            None => (s, None),
+        };
+        Ok(LinkId {
+            luid: u64::from_str_radix(luid, 16).map_err(|e| format!("{e}"))?,
+            gateway,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LinkKind {
+    Ethernet,
+    WiFi,
+    Vpn,
+    Other,
+}
+
+/// One adapter's current attachment to a network, and what it takes to send from it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Link {
+    pub id: LinkId,
+    /// The adapter's name, such as "Wi-Fi".
+    pub alias: String,
+    pub kind: LinkKind,
+    /// Interface indexes for IPv4 and IPv6; 0 where that version isn't enabled.
+    pub index_v4: u32,
+    pub index_v6: u32,
+    /// The addresses Probes leave from, which pick the interface for ICMP.
+    pub source_v4: Option<std::net::Ipv4Addr>,
+    pub source_v6: Option<std::net::Ipv6Addr>,
+    /// Whether this Link carries the default route.
+    pub default_route: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProbeResult {
     pub probe: Probe,

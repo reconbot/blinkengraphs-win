@@ -39,6 +39,8 @@ pub trait Sensors: Send {
     fn network(&mut self) -> Network;
     /// Seconds asleep since boot; a jump is a suspend that sent no notice.
     fn slept_s(&mut self) -> f64;
+    /// The Links up now, each to be measured on its own (spec `CONTEXT.md`, Link).
+    fn links(&mut self) -> Vec<model::Link>;
 }
 
 /// The OS adapter: performance counters through `collect`, network state through `probe`.
@@ -110,6 +112,10 @@ impl Sensors for SystemSensors {
 
     fn slept_s(&mut self) -> f64 {
         collect::slept_s()
+    }
+
+    fn links(&mut self) -> Vec<model::Link> {
+        probe::links()
     }
 
     fn network(&mut self) -> Network {

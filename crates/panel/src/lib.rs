@@ -5,7 +5,7 @@ use config::{Config, SectionConfig};
 use egui::{Align, Color32, Layout, RichText, Ui, vec2};
 use egui_plot::{Line, Plot, PlotPoints};
 use history::{GraphPoint as Point, History, Key, State};
-use model::{Metric, Ping, Probe, ProcessRow, Readout, Section, Unit};
+use model::{Link, LinkId, Metric, Ping, Probe, ProcessRow, Readout, Section, Unit};
 use theme::{accent, card, severity_color};
 use verdict::{Finding, Severity, bytes};
 
@@ -14,6 +14,8 @@ pub struct View<'a> {
     pub findings: &'a [Finding],
     pub processes: &'a [ProcessRow],
     pub adapters: &'a [String],
+    /// The Links being measured now.
+    pub links: &'a [Link],
     pub now: u64,
     pub elevated: bool,
     pub config_error: Option<&'a str>,
@@ -98,6 +100,8 @@ pub struct Panel {
     pub sort: ProcessSort,
     scroll_to_top: bool,
     graph_aggregate: model::Aggregate,
+    /// One Link to graph, or every Link (`None`, the default: spec `rules/history.md`).
+    pub link: Option<LinkId>,
 }
 
 /// Impact ranks by CPU and memory together, each as a share of the busiest process listed.
@@ -117,6 +121,7 @@ impl Default for Panel {
             sort: ProcessSort::Impact,
             scroll_to_top: false,
             graph_aggregate: config::defaults::get().graph_aggregate,
+            link: None,
         }
     }
 }
@@ -189,6 +194,9 @@ impl Panel {
                 for r in Range::ALL {
                     ui.selectable_value(&mut self.range, r, r.label());
                 }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.link_picker(ui, view)
+                });
             });
         }
     }
@@ -319,6 +327,7 @@ impl Panel {
             shown.contains(&Readout::Ping(Ping::Loss)),
         );
         let probes = latency_probes(view.history, all);
+        let lines = self.latency_lines(view.history, all);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("Latency")
@@ -344,39 +353,41 @@ impl Panel {
                 }
             });
         });
-        let series: Vec<_> = probes
+        let series: Vec<(String, Color32, Vec<Point>)> = lines
             .iter()
             .enumerate()
-            .map(|(i, p)| {
+            .map(|(i, (l, p))| {
                 (
-                    p.to_string(),
+                    line_name(p, l.as_ref(), view.links),
                     theme::probe(p, i),
-                    self.points(view, &Key::Probe(p.clone())),
+                    self.points(view, &Key::Probe(l.clone(), p.clone())),
                 )
             })
             .collect();
-        let names: Vec<(String, Color32, Vec<Point>)> = series;
+        let markers = self.link_markers(view);
         multiplot(
             ui,
             "latency",
-            &names,
+            &series,
+            &markers,
             if all { 180.0 } else { 110.0 },
             self.window(view),
         );
         ui.horizontal_wrapped(|ui| {
-            for (i, p) in probes.iter().enumerate() {
+            for (i, (l, p)) in lines.iter().enumerate() {
                 let v = config.probe_view(p);
-                let sum = view
-                    .history
-                    .aggregate(p, view.now, v.window_secs, v.aggregate);
-                let st = view.history.now(p, view.now);
+                let sum =
+                    view.history
+                        .aggregate_on(l.as_ref(), p, view.now, v.window_secs, v.aggregate);
+                let st = view.history.now_on(l.as_ref(), p, view.now);
                 // A p50 readout is the plain RTT, so it goes unnamed (spec `rules/probe-stats.md`).
                 let named = match v.aggregate {
                     model::Aggregate::P50 => String::new(),
                     a => format!("{} ", a.label()),
                 };
                 let text = format!(
-                    "{p}  {named}{}  {:.0}%{}",
+                    "{}  {named}{}  {:.0}%{}",
+                    line_name(p, l.as_ref(), view.links),
                     sum.value
                         .map(|r| model::rtt_text(r as f64))
                         .unwrap_or("—".into()),
@@ -389,6 +400,79 @@ impl Panel {
                 ui.label(RichText::new(text).small().color(theme::probe(p, i)));
             }
         });
+    }
+
+    /// Every (Link, Probe) the latency graph draws: one line per Link by default, or the
+    /// picked Link's.
+    fn latency_lines(&self, h: &History, all: bool) -> Vec<(Option<LinkId>, Probe)> {
+        let mut v: Vec<(Option<LinkId>, Probe)> = h
+            .series_keys()
+            .into_iter()
+            .filter(|(l, _)| self.link.is_none() || *l == self.link)
+            .filter(|(_, p)| {
+                if all {
+                    true
+                } else {
+                    p.protocol == model::Protocol::Icmp
+                }
+            })
+            .collect();
+        v.sort_by_key(|(l, p)| {
+            (
+                p.target.to_string(),
+                p.protocol.to_string(),
+                l.as_ref() != h.followed(),
+                l.clone(),
+            )
+        });
+        v
+    }
+
+    /// Where the followed Link changed, on ranges drawn from Raw (spec `rules/history.md`).
+    fn link_markers(&self, view: &View) -> Vec<f64> {
+        if self.range.history().source() != history::range::Source::Raw {
+            return vec![];
+        }
+        let changes = view.history.link_changes();
+        // The first entry is the Link History started on, not a change.
+        changes
+            .iter()
+            .skip(1)
+            .map(|(at, _)| *at as f64 - view.now as f64)
+            .collect()
+    }
+
+    /// Lets the user graph one Link, once more than one has results.
+    fn link_picker(&mut self, ui: &mut Ui, view: &View) {
+        let mut links: Vec<Option<LinkId>> = view
+            .history
+            .series_keys()
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect();
+        links.sort();
+        links.dedup();
+        if links.len() < 2 {
+            self.link = None;
+            return;
+        }
+        let name = |l: &Option<LinkId>| match l {
+            None => "Unknown Link".to_string(),
+            Some(id) => link_alias(id, view.links),
+        };
+        let selected = self
+            .link
+            .clone()
+            .map_or("Every Link".to_string(), |l| name(&Some(l)));
+        egui::ComboBox::from_id_salt("link")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.link, None, "Every Link");
+                for l in links.into_iter().flatten() {
+                    let text = name(&Some(l.clone()));
+                    ui.selectable_value(&mut self.link, Some(l), text);
+                }
+            });
     }
 
     fn network(&self, ui: &mut Ui, view: &View, config: &Config) {
@@ -421,6 +505,22 @@ impl Panel {
         view.history
             .series(key, self.range.history(), view.now, self.graph_aggregate)
     }
+}
+
+/// "icmp 1.1.1.1 · Wi-Fi": the Probe, and its Link's adapter when known.
+fn line_name(p: &Probe, link: Option<&LinkId>, links: &[Link]) -> String {
+    match link {
+        Some(l) => format!("{p} · {}", link_alias(l, links)),
+        None => p.to_string(),
+    }
+}
+
+/// The adapter's name, or the Link's id once it is gone.
+fn link_alias(id: &LinkId, links: &[Link]) -> String {
+    links
+        .iter()
+        .find(|l| l.id == *id)
+        .map_or_else(|| id.to_string(), |l| l.alias.clone())
 }
 
 fn latency_probes(h: &History, all: bool) -> Vec<Probe> {
@@ -848,6 +948,7 @@ fn multiplot(
     ui: &mut Ui,
     id: &str,
     series: &[(String, Color32, Vec<Point>)],
+    markers: &[f64],
     height: f32,
     w: Window,
 ) {
@@ -858,6 +959,13 @@ fn multiplot(
             unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
             states(pu, w, series.iter().map(|s| s.2.as_slice()));
             aggregate_tag(pu, w);
+            for x in markers {
+                pu.vline(
+                    egui_plot::VLine::new("Link changed", *x)
+                        .color(theme::text_weak())
+                        .width(1.0),
+                );
+            }
             for (name, color, pts) in series {
                 for l in to_lines(name, *color, pts, false, w) {
                     pu.line(l);
