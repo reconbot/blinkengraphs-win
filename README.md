@@ -2,11 +2,9 @@
 
 Live CPU, memory, disk, network and latency graphs in the Windows 11 taskbar, inspired by iStat Menus, MenuMeters, gping and mtr. Click a graph to see a plain-language verdict on why the machine is slow or the network isn't responding.
 
-**Download:** the [`main-latest`](https://github.com/reconbot/blinkengraphs-win/releases/tag/main-latest) prerelease, rebuilt on every push to `main`, or a [tagged release](https://github.com/reconbot/blinkengraphs-win/releases). Builds are x64 and ARM64. They are not Authenticode-signed, so SmartScreen will warn. Check a download with `gh attestation verify blinkengraphs-x64.exe -R reconbot/blinkengraphs-win`.
-
 ## Install
 
-Run the MSI from a [release](https://github.com/reconbot/blinkengraphs-win/releases/latest) and choose **Just me** or **Everyone**. Settings survive uninstall.
+Download the x64 or ARM64 MSI from the [latest release](https://github.com/reconbot/blinkengraphs-win/releases/latest) (or the [`main-latest`](https://github.com/reconbot/blinkengraphs-win/releases/tag/main-latest) prerelease, rebuilt on every push), run it, and choose **Just me** or **Everyone**. Settings survive uninstall. Builds are unsigned, so SmartScreen warns; `gh attestation verify <file> -R reconbot/blinkengraphs-win` checks provenance.
 
 | Scope | Install | Uninstall |
 |---|---|---|
@@ -21,9 +19,9 @@ Run the MSI from a [release](https://github.com/reconbot/blinkengraphs-win/relea
 | Memory | commit charge, hard faults | physical, compressed, top processes |
 | Network | down/up on the followed adapter | per adapter, errors |
 | Disk | active time % | MB/s, response time, queue |
-| Latency | RTT + loss to 1.1.1.1 | ICMP/TCP/DNS probes to gateway, 1.1.1.1, 9.9.9.9; per-hop trace |
+| Latency | RTT + loss to 1.1.1.1 | ICMP/TCP/DNS Probes to the gateway, Cloudflare and Quad9 over IPv4 and IPv6, and system DNS; per-hop trace |
 
-Every metric, probe and interval is configurable. Nothing needs Administrator; an optional companion service adds per-process network bytes and UDP hop traces.
+Every metric, Probe, interval, color and aggregate is configurable. Nothing needs Administrator.
 
 ## Screenshots
 
@@ -45,7 +43,7 @@ Tray Icons (actual size, then 4× zoom):
 - Click any Meter, or press `Ctrl+Alt+B`, to open the Panel. Click away or press `Esc` to close it.
 - Right-click a Meter for Open, Settings and Quit.
 - Settings live in `%APPDATA%\blinkengraphs\config.toml`; the Settings tab edits them live. History is stored in `history.db` in the same folder.
-- Windows 11 hides new tray icons in the overflow menu: drag them onto the taskbar, or switch Surface to **Taskbar Strip**.
+- Windows 11 hides new tray icons in the overflow menu: drag them onto the taskbar, or set **Taskbar display** to **Strip**.
 
 ## Milestones
 
@@ -59,14 +57,9 @@ Tray Icons (actual size, then 4× zoom):
 - [x] **M2: Taskbar Strip and History.**
   - Strip docked in the taskbar, falling back to Tray Icons
   - 7 days of one-minute Rollups in SQLite, browsable in the Panel's history ranges
-- [ ] **Near term.**
-  - Tray icons and Strip cells: check whether each says what it shows; add a text label if not
-  - Themes, and a color per Probe
-  - Per displayed Probe: time window and aggregate (p99, p95, p50, avg, max)
-  - Graph aggregate for all graphs (same choices)
-- [x] **M3: Distribution.**
-  - One MSI for per-user (no admin) or per-machine installs, interactive or `msiexec` switches, deployable through Intune ([ADR 0010](docs/adr/0010-single-dual-mode-msi.md)); per-machine installs will add the M4 service
-  - Autostart at sign-in
+- [x] **Themes.** Per-Probe colors, time windows and aggregates (p99, p95, p50, avg, max)
+- [x] **M3: Distribution.** One MSI for per-user or per-machine installs, starting at sign-in ([ADR 0010](docs/adr/0010-single-dual-mode-msi.md))
+- [ ] **Next:** text labels on Tray Icons and Strip cells where the graph alone doesn't say what it shows
 - [ ] **Later: code signing** with Azure Artifact Signing ([ADR 0009](docs/adr/0009-azure-artifact-signing.md), deferred)
 - [ ] **M4: Elevated Extras.** Optional LocalSystem companion service for per-process network bytes and UDP hop traces ([ADR 0008](docs/adr/0008-elevated-extras-via-companion-service.md))
 
@@ -74,7 +67,7 @@ Tray Icons (actual size, then 4× zoom):
 
 | Repo | Contents |
 |---|---|
-| [blinkengraphs](https://github.com/reconbot/blinkengraphs) | Landing page and shared spec |
+| [blinkengraphs](https://github.com/reconbot/blinkengraphs) | Landing page and shared spec: vocabulary, Verdict rules, test vectors, tokens, icon |
 | [blinkengraphs-win](https://github.com/reconbot/blinkengraphs-win) | Windows 11 app (Rust) |
 | [blinkengraphs-mac](https://github.com/reconbot/blinkengraphs-mac) | macOS menu bar app (planned) |
 | [blinkengraphs-ios](https://github.com/reconbot/blinkengraphs-ios) | iOS network diagnosis app (planned) |
@@ -82,7 +75,6 @@ Tray Icons (actual size, then 4× zoom):
 ## Docs
 
 - [`docs/PLAN.md`](docs/PLAN.md): decisions, defaults, architecture
-- [reconbot/blinkengraphs](https://github.com/reconbot/blinkengraphs): shared spec (vocabulary, Verdict rules, test vectors, design tokens) and the cross-platform plan
 - [`docs/adr/`](docs/adr/): why things are the way they are
 - [`docs/research/`](docs/research/): prior art and the Rust/Windows stack, with sources
 
