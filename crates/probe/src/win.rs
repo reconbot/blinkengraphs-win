@@ -527,3 +527,17 @@ pub fn reverse_dns(addr: IpAddr) -> Option<String> {
     let len = host.iter().position(|&c| c == 0).unwrap_or(host.len());
     Some(String::from_utf16_lossy(&host[..len]))
 }
+
+/// Windows' own verdict that the network is captive (Windows 10 2004 and later).
+/// https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-getnetworkconnectivityhint
+pub(crate) fn captive_hint() -> bool {
+    use windows_sys::Win32::{
+        NetworkManagement::IpHelper::GetNetworkConnectivityHint,
+        Networking::WinSock::{
+            NL_NETWORK_CONNECTIVITY_HINT, NetworkConnectivityLevelHintConstrainedInternetAccess,
+        },
+    };
+    let mut hint: NL_NETWORK_CONNECTIVITY_HINT = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetNetworkConnectivityHint(&mut hint) } == 0;
+    ok && hint.ConnectivityLevel == NetworkConnectivityLevelHintConstrainedInternetAccess
+}

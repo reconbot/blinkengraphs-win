@@ -1,5 +1,6 @@
 //! Runs Probe Groups on their own threads and streams results over a channel. No admin rights needed (ADR 0002).
 
+pub mod captive;
 mod dns;
 pub mod names;
 mod net;
