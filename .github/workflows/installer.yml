@@ -38,7 +38,11 @@ jobs:
           )
           foreach ($c in $cases) {
             Msi "/i `"$msi`" /qn /l*v msi.log $($c.args)"
-            if (-not (Test-Path "$($c.dir)\blinkengraphs.exe")) { Get-Content msi.log -Tail 60; throw "$($c.name): exe missing in $($c.dir)" }
+            if (-not (Test-Path "$($c.dir)\blinkengraphs.exe")) {
+              Select-String -Path msi.log -Pattern 'APPLICATIONFOLDER|WixPerUserFolder|WixPerMachineFolder|ALLUSERS' | Select-Object -Last 15
+              Get-ChildItem $env:LOCALAPPDATA, $env:ProgramFiles -Recurse -Filter blinkengraphs.exe -ErrorAction SilentlyContinue | ForEach-Object { "found: $($_.FullName)" }
+              throw "$($c.name): exe missing in $($c.dir)"
+            }
             $run = Get-ItemPropertyValue "$($c.run)\Software\Microsoft\Windows\CurrentVersion\Run" -Name blinkengraphs
             Msi "/x `"$msi`" /qn /l*v msi.log $($c.args)"
             if (Test-Path "$($c.dir)\blinkengraphs.exe") { throw "$($c.name): uninstall left the exe" }

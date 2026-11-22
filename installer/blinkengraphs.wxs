@@ -13,6 +13,9 @@
     <!-- WixUI_Advanced asks "Just me" or "Everyone"; per-user lands in %LocalAppData%\Programs. -->
     <Property Id="ApplicationFolderName" Value="blinkengraphs" />
     <Property Id="WixAppFolder" Value="WixPerUserFolder" />
+    <!-- WixUI_Advanced defaults per-user installs to %LocalAppData%\Apps; Windows apps use %LocalAppData%\Programs. -->
+    <SetProperty Id="WixPerUserFolder" Value="[LocalAppDataFolder]Programs\[ApplicationFolderName]"
+                 After="WixSetDefaultPerUserFolder" Sequence="both" />
     <WixVariable Id="WixUILicenseRtf" Value="$(License)" />
     <ui:WixUI Id="WixUI_Advanced" />
 
