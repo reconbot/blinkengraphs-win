@@ -42,6 +42,8 @@ enum UiEvent {
     StripClick,
     /// Another launch found this one running and asked it to show the Panel.
     Relaunched,
+    /// An installer's Restart Manager, or sign-out, asked the app to close.
+    EndSession,
 }
 
 const SHOW_EVENT: &str = "Local\\blinkengraphs-show\0";
@@ -65,26 +67,93 @@ pub fn run() {
     install_crash_log();
     let path = config::dir().join("config.toml");
     let (config, error) = Config::load(&path);
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("blinkengraphs")
+        .with_inner_size(PANEL)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_taskbar(false)
+        .with_always_on_top()
+        .with_visible(false)
+        .with_position([-32000.0, -32000.0]);
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("blinkengraphs")
-            .with_inner_size(PANEL)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_taskbar(false)
-            .with_always_on_top()
-            .with_visible(false)
-            .with_position([-32000.0, -32000.0]),
+        viewport: viewport.clone(),
         ..Default::default()
     };
-    let _ = eframe::run_native(
+    if !opengl2() {
+        // A VM or VDI host without a GPU driver offers only Windows' OpenGL 1.1; egui_glow needs 2.0.
+        if let Err(e) = crate::soft::run(viewport, move |ctx| App::new(ctx, config, error, path)) {
+            crash_log(&format!("software window failed: {e}"));
+        }
+        return;
+    }
+    if let Err(e) = eframe::run_native(
         "blinkengraphs",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, config, error, path)))),
-    );
+        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, config, error, path)))),
+    ) {
+        crash_log(&format!("window failed to start: {e}"));
+    }
 }
 
-struct App {
+/// Whether the default OpenGL driver is 2.0 or later, from a throwaway legacy WGL context.
+/// winit allows one event loop per process, so this has to be known before eframe starts.
+fn opengl2() -> bool {
+    use windows_sys::Win32::{
+        Graphics::{Gdi::*, OpenGL::*},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::*,
+    };
+    unsafe {
+        let hwnd = CreateWindowExW(
+            0,
+            windows_sys::core::w!("STATIC"),
+            std::ptr::null(),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            GetModuleHandleW(std::ptr::null()),
+            std::ptr::null(),
+        );
+        let dc = GetDC(hwnd);
+        let pfd = PIXELFORMATDESCRIPTOR {
+            nSize: size_of::<PIXELFORMATDESCRIPTOR>() as u16,
+            nVersion: 1,
+            dwFlags: PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+            iPixelType: PFD_TYPE_RGBA,
+            cColorBits: 32,
+            iLayerType: PFD_MAIN_PLANE as u8,
+            ..std::mem::zeroed()
+        };
+        let mut major = 0;
+        if SetPixelFormat(dc, ChoosePixelFormat(dc, &pfd), &pfd) != 0 {
+            let rc = wglCreateContext(dc);
+            if !rc.is_null() && wglMakeCurrent(dc, rc) != 0 {
+                let v = glGetString(GL_VERSION);
+                if !v.is_null() {
+                    major = std::ffi::CStr::from_ptr(v.cast())
+                        .to_bytes()
+                        .iter()
+                        .take_while(|b| b.is_ascii_digit())
+                        .fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+                }
+                wglMakeCurrent(std::ptr::null_mut(), std::ptr::null_mut());
+            }
+            if !rc.is_null() {
+                wglDeleteContext(rc);
+            }
+        }
+        ReleaseDC(hwnd, dc);
+        DestroyWindow(hwnd);
+        major >= 2
+    }
+}
+
+pub(crate) struct App {
     engine: Engine,
     config: Config,
     path: PathBuf,
@@ -116,13 +185,8 @@ enum MenuAction {
 }
 
 impl App {
-    fn new(
-        cc: &eframe::CreationContext,
-        config: Config,
-        error: Option<String>,
-        path: PathBuf,
-    ) -> Self {
-        let ctx = cc.egui_ctx.clone();
+    fn new(ctx: &egui::Context, config: Config, error: Option<String>, path: PathBuf) -> Self {
+        let ctx = ctx.clone();
         panel::theme::install(&ctx);
 
         let (tx, events) = mpsc::channel();
@@ -140,6 +204,8 @@ impl App {
         let strip = Strip::new(move || strip_click(UiEvent::StripClick));
         let relaunch = forward(tx.clone(), ctx.clone());
         watch_relaunch(move || relaunch(UiEvent::Relaunched));
+        let end = forward(tx.clone(), ctx.clone());
+        watch_session_end(move || end(UiEvent::EndSession));
         let f = forward(tx, ctx.clone());
         GlobalHotKeyEvent::set_event_handler(Some(move |e| f(UiEvent::Hotkey(e))));
 
@@ -379,6 +445,16 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.tick(ctx)
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui)
+    }
+}
+
+impl App {
+    pub(crate) fn tick(&mut self, ctx: &egui::Context) {
         if !self.styled {
             self.styled = style_window();
             // eframe shows the root viewport after its first frame even when built invisible.
@@ -415,6 +491,7 @@ impl eframe::App for App {
                 UiEvent::Hotkey(_) => {}
                 UiEvent::StripClick => self.toggle(ctx, None),
                 UiEvent::Relaunched => self.show(ctx, None, None),
+                UiEvent::EndSession => self.quit(),
             }
         }
         self.redraw_icons();
@@ -428,7 +505,7 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         if !self.visible {
             return;
         }
@@ -619,25 +696,91 @@ fn watch_relaunch(on_show: impl Fn() + Send + 'static) {
     });
 }
 
+/// An MSI upgrade's Restart Manager closes apps holding its files by sending WM_QUERYENDSESSION
+/// and WM_ENDSESSION to their top-level windows, then relaunches the ones registered for restart.
+/// winit's window ignores both, so this hidden one quits cleanly instead.
+/// https://learn.microsoft.com/windows/win32/rstmgr/guidelines-for-applications
+fn watch_session_end(on_end: impl Fn() + Send + 'static) {
+    use windows_sys::Win32::{
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        System::{LibraryLoader::GetModuleHandleW, Recovery::*},
+        UI::WindowsAndMessaging::*,
+    };
+    thread_local! {
+        static ON_END: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    }
+    unsafe extern "system" fn proc_(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        match msg {
+            WM_QUERYENDSESSION => 1,
+            WM_ENDSESSION if wp != 0 => {
+                ON_END.with(|f| f.borrow().as_ref().map(|f| f()));
+                // The UI thread saves and exits the process; returning first would let Windows
+                // treat the app as closed while it is still writing.
+                std::thread::sleep(Duration::from_secs(10));
+                0
+            }
+            _ => unsafe { DefWindowProcW(h, msg, wp, lp) },
+        }
+    }
+    // No restart after a reboot or crash: the Run value starts the app at sign-in.
+    unsafe {
+        RegisterApplicationRestart(
+            std::ptr::null(),
+            RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT,
+        )
+    };
+    std::thread::spawn(move || unsafe {
+        ON_END.with(|f| *f.borrow_mut() = Some(Box::new(on_end)));
+        let hinst = GetModuleHandleW(std::ptr::null());
+        let class: Vec<u16> = "blinkengraphs-session\0".encode_utf16().collect();
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(proc_),
+            hInstance: hinst,
+            lpszClassName: class.as_ptr(),
+            ..std::mem::zeroed()
+        };
+        RegisterClassW(&wc);
+        // Top-level (not message-only): Restart Manager only messages top-level windows.
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            class.as_ptr(),
+            class.as_ptr(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hinst,
+            std::ptr::null(),
+        );
+        let mut msg = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
 /// Release builds abort on panic with no console, so the reason is otherwise lost.
 fn install_crash_log() {
-    let path = config::dir().join("crash.log");
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(
-                f,
-                "{} v{} {info}\n{}",
-                model::now(),
-                env!("CARGO_PKG_VERSION"),
-                std::backtrace::Backtrace::force_capture()
-            );
-        }
+        crash_log(&format!(
+            "{info}\n{}",
+            std::backtrace::Backtrace::force_capture()
+        ));
         default(info);
     }));
+}
+
+pub(crate) fn crash_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config::dir().join("crash.log"))
+    {
+        let _ = writeln!(f, "{} v{} {msg}", model::now(), env!("CARGO_PKG_VERSION"));
+    }
 }

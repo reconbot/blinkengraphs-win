@@ -1,0 +1,22 @@
+[package]
+name = "softpanel"
+description = "CPU rasterizer for egui, vendored from egui_software_backend 0.0.3 (DGriffin91) and ported to egui 0.37"
+version.workspace = true
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
+
+[dev-dependencies]
+egui = { version = "0.37", default-features = false, features = ["default_fonts"] }
+
+[dependencies]
+egui = { version = "0.37", default-features = false }
+constify = "0.0.1"
+strength_reduce = "0.2.4"

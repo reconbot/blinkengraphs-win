@@ -14,6 +14,11 @@ engine.workspace = true
 render.workspace = true
 panel.workspace = true
 meters.workspace = true
+softpanel = { path = "../crates/softpanel" }
+softbuffer = { version = "0.4", default-features = false }
+bytemuck = "1"
+winit = "0.30"
+egui-winit = { version = "0.37", default-features = false }
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 tray-icon = "0.26"
 global-hotkey = "0.10"
@@ -21,9 +26,11 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
+  "Win32_Graphics_OpenGL",
   "Win32_System_LibraryLoader",
   "Win32_Security",
   "Win32_System_Power",
+  "Win32_System_Recovery",
   "Win32_System_Registry",
   "Win32_System_SystemServices",
   "Win32_System_StationsAndDesktops",

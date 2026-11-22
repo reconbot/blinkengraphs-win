@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod soft;
+#[cfg(windows)]
 mod strip;
 #[cfg(windows)]
 mod win;
