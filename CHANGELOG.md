@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.5.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.4.0...v1.5.0) (2026-11-22)
+
+
+### Features
+
+* every default comes from the merged defaults; Graph aggregate p95; graphs name their aggregate ([#32](https://github.com/reconbot/blinkengraphs-win/issues/32)) ([749e31c](https://github.com/reconbot/blinkengraphs-win/commit/749e31c6ea1a6b3ccba48c5a88531d55726c230f))
+* live Captive Portal check feeds the Verdict ([#34](https://github.com/reconbot/blinkengraphs-win/issues/34)) ([709545e](https://github.com/reconbot/blinkengraphs-win/commit/709545e2d970829a385d23ebbc02b0ee3d236f9a))
+* pass spec v1.7.0 vectors read from the spec; Captive Portal Finding and Public Address reading ([#30](https://github.com/reconbot/blinkengraphs-win/issues/30)) ([f50b995](https://github.com/reconbot/blinkengraphs-win/commit/f50b99576c7211b2bbd5be1c4cc7c28e68621225))
+* silent upgrades relaunch the app; software Panel without OpenGL 2.0 ([#24](https://github.com/reconbot/blinkengraphs-win/issues/24)) ([4d03254](https://github.com/reconbot/blinkengraphs-win/commit/4d03254e5bf955e1dfccb23fb0188b2c813e3963))
+* Theme colors come from the spec's tokens; an explicit Light or Dark applies to Meters too ([#31](https://github.com/reconbot/blinkengraphs-win/issues/31)) ([a04d530](https://github.com/reconbot/blinkengraphs-win/commit/a04d530547083a2b5414554b939c3592a4120e7c))
+* VPN Fault Domain in the Verdict (no Windows VPN detection yet) ([#22](https://github.com/reconbot/blinkengraphs-win/issues/22)) ([dadeb72](https://github.com/reconbot/blinkengraphs-win/commit/dadeb729c2258509f5a8f03a8c35abfc7a026cdf))
+
 ## [1.4.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.3.0...v1.4.0) (2026-11-22)
 
 
