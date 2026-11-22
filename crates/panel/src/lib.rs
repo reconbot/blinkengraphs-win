@@ -631,7 +631,7 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
     let ms = |v: Option<f32>| v.map(|v| format!("{v:.1}")).unwrap_or("—".into());
     let cols: [(f32, &str); 7] = [
         (22.0, "#"),
-        (0.0, "Address"),
+        (0.0, "Host"),
         (40.0, "Loss"),
         (44.0, "Last"),
         (44.0, "Avg"),
@@ -653,10 +653,7 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
         };
         let cells = [
             (22.0, RichText::new(hop.ttl.to_string()).weak()),
-            (
-                0.0,
-                RichText::new(hop.addr.map(|a| a.to_string()).unwrap_or("???".into())),
-            ),
+            (0.0, RichText::new(host(hop.addr))),
             (
                 40.0,
                 RichText::new(format!("{:.0}%", hop.loss * 100.0)).color(loss_color),
@@ -667,6 +664,19 @@ fn hop_table(ui: &mut Ui, h: &History, trace: &Probe) {
             (44.0, RichText::new(ms(hop.worst_ms))),
         ];
         table_row(ui, &cells, i % 2 == 1);
+    }
+}
+
+/// The Hop's reverse-DNS name with its address, like mtr's `-b`, or the address alone.
+fn host(addr: Option<std::net::IpAddr>) -> String {
+    static REVERSE_DNS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let Some(a) = addr else {
+        return "???".into();
+    };
+    let lookup = *REVERSE_DNS.get_or_init(|| config::defaults::get().hop_trace.reverse_dns);
+    match lookup.then(|| probe::names::name(a)).flatten() {
+        Some(name) => format!("{name} ({a})"),
+        None => a.to_string(),
     }
 }
 

@@ -22,11 +22,11 @@ use windows_sys::Win32::{
         IcmpParseReplies, IcmpSendEcho2, MIB_IPFORWARD_ROW2,
     },
     Networking::WinSock::{
-        AF_INET, AF_INET6, AF_UNSPEC, ICMP_ERROR_INFO, IN_ADDR, IN_ADDR_0, IN6_ADDR, IN6_ADDR_0,
-        IPPROTO_TCP, SIO_TCP_INITIAL_RTO, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET, SOCKET,
-        TCP_FAIL_CONNECT_ON_ICMP_ERROR, TCP_ICMP_ERROR_INFO,
-        TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS, WSAIoctl, getsockopt,
-        setsockopt,
+        AF_INET, AF_INET6, AF_UNSPEC, GetNameInfoW, ICMP_ERROR_INFO, IN_ADDR, IN_ADDR_0, IN6_ADDR,
+        IN6_ADDR_0, IPPROTO_TCP, NI_MAXHOST, NI_NAMEREQD, SIO_TCP_INITIAL_RTO, SOCKADDR,
+        SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET, SOCKET, TCP_FAIL_CONNECT_ON_ICMP_ERROR,
+        TCP_ICMP_ERROR_INFO, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS, TCP_INITIAL_RTO_PARAMETERS,
+        WSAIoctl, getsockopt, setsockopt,
     },
     System::Threading::{CreateEventW, WaitForMultipleObjects},
 };
@@ -473,4 +473,57 @@ pub fn system_resolver() -> Option<IpAddr> {
         adapter = a.Next;
     }
     None
+}
+
+/// The PTR name for `addr`, or `None` when it has none.
+/// https://learn.microsoft.com/windows/win32/api/ws2tcpip/nf-ws2tcpip-getnameinfow
+pub fn reverse_dns(addr: IpAddr) -> Option<String> {
+    // GetNameInfoW needs Winsock started; std starts it with its first socket.
+    static WINSOCK: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    WINSOCK.get_or_init(|| drop(std::net::UdpSocket::bind("127.0.0.1:0")));
+
+    let mut host = [0u16; NI_MAXHOST as usize];
+    let rc = match addr {
+        IpAddr::V4(a) => {
+            let sa = SOCKADDR_IN {
+                sin_family: AF_INET,
+                sin_addr: IN_ADDR {
+                    S_un: IN_ADDR_0 {
+                        S_addr: u32::from_ne_bytes(a.octets()),
+                    },
+                },
+                ..Default::default()
+            };
+            unsafe {
+                GetNameInfoW(
+                    (&raw const sa).cast::<SOCKADDR>(),
+                    size_of::<SOCKADDR_IN>() as i32,
+                    host.as_mut_ptr(),
+                    host.len() as u32,
+                    null_mut(),
+                    0,
+                    NI_NAMEREQD as i32,
+                )
+            }
+        }
+        IpAddr::V6(a) => {
+            let sa = sockaddr_in6(a);
+            unsafe {
+                GetNameInfoW(
+                    (&raw const sa).cast::<SOCKADDR>(),
+                    size_of::<SOCKADDR_IN6>() as i32,
+                    host.as_mut_ptr(),
+                    host.len() as u32,
+                    null_mut(),
+                    0,
+                    NI_NAMEREQD as i32,
+                )
+            }
+        }
+    };
+    if rc != 0 {
+        return None;
+    }
+    let len = host.iter().position(|&c| c == 0).unwrap_or(host.len());
+    Some(String::from_utf16_lossy(&host[..len]))
 }

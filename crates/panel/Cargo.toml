@@ -11,6 +11,7 @@ config.workspace = true
 palette.workspace = true
 history.workspace = true
 verdict.workspace = true
+probe.workspace = true
 egui = { version = "0.37", features = ["default_fonts"] }
 egui_plot = "0.38"
 
