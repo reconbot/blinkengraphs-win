@@ -10,7 +10,9 @@ export PATH="$PATH:$HOME/.dotnet/tools"
 wix eula accept wix7
 wix extension add -g WixToolset.UI.wixext/7.0.1 WixToolset.Util.wixext/7.0.1
 mkdir -p "$out"
+brand="$out/brand"
+cargo run --quiet --release -p brand -- "$here/../spec/brand/icon.svg" "$brand"
 wix build "$here/blinkengraphs.wxs" -arch "$arch" -acceptEula wix7 \
   -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
-  -d Version="$version" -d Exe="$exe" -d License="$here/license.rtf" \
+  -d Version="$version" -d Exe="$exe" -d License="$here/license.rtf" -d Brand="$brand" \
   -o "$out/blinkengraphs-$arch.msi"
