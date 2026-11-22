@@ -55,6 +55,7 @@ jobs:
         run: |
           mkdir dist
           cp target/${{ matrix.target }}/release/blinkengraphs.exe dist/blinkengraphs-${{ matrix.arch }}.exe
+          installer/build.sh ${{ matrix.arch }} target/${{ matrix.target }}/release/blinkengraphs.exe dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dist-${{ matrix.arch }}
@@ -75,7 +76,9 @@ jobs:
       - if: ${{ !github.event.repository.private }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: dist/*.exe
+          subject-path: |
+            dist/*.exe
+            dist/*.msi
       - name: Rolling main-latest prerelease
         if: github.event_name == 'push'
         env:
@@ -86,12 +89,12 @@ jobs:
           gh release view main-latest >/dev/null 2>&1 || gh release create main-latest --prerelease \
             --title "main (rolling)" --notes "Latest build of main. Unsigned; verify with: gh attestation verify <exe> -R ${{ github.repository }}"
           gh release edit main-latest --target "$GITHUB_SHA"
-          gh release upload main-latest dist/*.exe --clobber
+          gh release upload main-latest dist/*.exe dist/*.msi --clobber
       - if: needs.release-please.outputs.created == 'true' || inputs.tag
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || needs.release-please.outputs.tag }}
-        run: gh release upload "$TAG" dist/*.exe --clobber
+        run: gh release upload "$TAG" dist/*.exe dist/*.msi --clobber
 
   screenshots:
     needs: [release-please, publish]
