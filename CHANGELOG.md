@@ -1,5 +1,20 @@
 # Changelog
 
+## [3.0.0](https://github.com/reconbot/blinkengraphs-win/compare/v2.0.0...v3.0.0) (2026-11-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* history.db starts empty; Minutes from earlier versions are dropped, and the rollup_days setting is replaced by archive_days.
+
+### Features
+
+* every Link is measured on its own interface; History, stats and graphs per Link ([#48](https://github.com/reconbot/blinkengraphs-win/issues/48)) ([49ae234](https://github.com/reconbot/blinkengraphs-win/commit/49ae2343fb7491d701014a161d092c742e0ac255)), closes [#40](https://github.com/reconbot/blinkengraphs-win/issues/40)
+* History is Raw plus Archives in SQLite; graphs draw one source per range ([#44](https://github.com/reconbot/blinkengraphs-win/issues/44)) ([723019e](https://github.com/reconbot/blinkengraphs-win/commit/723019e4449f759b76c03462cf64df34ecddf51f)), closes [#40](https://github.com/reconbot/blinkengraphs-win/issues/40)
+* Pauses: suspend, resume, idle rest, shutdown and kills are not measured, and Rounds they cut record nothing ([#45](https://github.com/reconbot/blinkengraphs-win/issues/45)) ([6484669](https://github.com/reconbot/blinkengraphs-win/commit/6484669b811ccc41c703a803ecc1f5a540c4eae4)), closes [#40](https://github.com/reconbot/blinkengraphs-win/issues/40)
+* spec 5.1.0: stats from now, Resuming Verdict, tie rule, and pure Pause, Archive and graph-range cores ([#42](https://github.com/reconbot/blinkengraphs-win/issues/42)) ([a04dd04](https://github.com/reconbot/blinkengraphs-win/commit/a04dd047da9467d44560809b06e56200c1de401d)), closes [#40](https://github.com/reconbot/blinkengraphs-win/issues/40)
+* TCP and UDP Probes are a checkbox with a port beside it ([#47](https://github.com/reconbot/blinkengraphs-win/issues/47)) ([94280d0](https://github.com/reconbot/blinkengraphs-win/commit/94280d0aa38463559b82668d4979dd272c1efda8))
+
 ## [2.0.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.5.0...v2.0.0) (2026-11-22)
 
 
