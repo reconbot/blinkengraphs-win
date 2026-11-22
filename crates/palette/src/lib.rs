@@ -4,6 +4,12 @@ use model::Section;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Meter fill fractions that turn warn and crit: spec tokens `threshold.meter-warn` and
+/// `threshold.meter-crit`. Constants because Meters compare against them every draw;
+/// the conformance tests hold them to the spec.
+pub const METER_WARN: f32 = 0.6;
+pub const METER_CRIT: f32 = 0.85;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
@@ -108,24 +114,18 @@ impl Palette {
         let pick = |dark: u32, lite: u32| h(if light { lite } else { dark });
         let (sections, upload, loss, ok, warn, crit, series) = match preset {
             Preset::Default => (
+                Section::ALL.map(|x| token(shade, &format!("section.{}", key(x)))),
+                token(shade, "section.upload"),
+                token(shade, "loss"),
+                token(shade, "severity.ok"),
+                token(shade, "severity.warn"),
+                token(shade, "severity.crit"),
                 [
-                    pick(0x4fc3f7, 0x0277bd),
-                    pick(0x9ccc65, 0x388e3c),
-                    pick(0x7ab8ff, 0x1565c0),
-                    pick(0xb39ddb, 0x5e35b1),
-                    pick(0xffd54f, 0xb26a00),
-                ],
-                pick(0xff9be1, 0xc2185b),
-                pick(0xff3b3b, 0xc62828),
-                pick(0x4ade80, 0x2e7d32),
-                pick(0xffb340, 0xd97706),
-                pick(0xff5a5a, 0xd32f2f),
-                [
-                    pick(0xffd54f, 0xb26a00),
-                    pick(0x4fc3f7, 0x0277bd),
+                    token(shade, "section.latency"),
+                    token(shade, "section.cpu"),
                     pick(0xf48fb1, 0xc2185b),
-                    pick(0x9ccc65, 0x388e3c),
-                    pick(0xb39ddb, 0x5e35b1),
+                    token(shade, "section.memory"),
+                    token(shade, "section.disk"),
                     pick(0xff8a65, 0xd84315),
                     pick(0x4dd0e1, 0x00838f),
                     pick(0xe0e0e0, 0x424242),
@@ -191,13 +191,13 @@ impl Palette {
             crit,
             series,
             probes: overrides.probes.clone(),
-            bg: pick(0x12151c, 0xf3f4f7),
-            card: pick(0x1b202a, 0xffffff),
-            card_edge: pick(0x2a313d, 0xd9dde4),
+            bg: token(shade, "surface.background"),
+            card: token(shade, "surface.card"),
+            card_edge: token(shade, "surface.card-edge"),
             faint: pick(0x202631, 0xeef0f4),
             field: pick(0x0e1116, 0xe8ebf0),
-            text: pick(0xe6eaf0, 0x1b1f27),
-            text_weak: pick(0x8b95a5, 0x5b6473),
+            text: token(shade, "surface.text"),
+            text_weak: token(shade, "surface.text-weak"),
         };
         for (s, c) in &overrides.sections {
             p.sections[index(*s)] = *c;
@@ -222,6 +222,44 @@ impl Palette {
     }
 }
 
+fn key(s: Section) -> &'static str {
+    match s {
+        Section::Cpu => "cpu",
+        Section::Memory => "memory",
+        Section::Network => "network",
+        Section::Disk => "disk",
+        Section::Latency => "latency",
+    }
+}
+
+/// A color from the spec's design tokens (spec `tokens/README.md`): the base file is the dark
+/// Appearance; in the light one, each color the light file has replaces the base one.
+fn token(shade: Shade, path: &str) -> Rgb {
+    use std::sync::OnceLock;
+    type Tokens = serde_json::Value;
+    static BASE: OnceLock<Tokens> = OnceLock::new();
+    static LIGHT: OnceLock<Tokens> = OnceLock::new();
+    let parse = |s: &str| serde_json::from_str::<Tokens>(s).expect("spec tokens");
+    let base = BASE.get_or_init(|| {
+        parse(include_str!(
+            "../../../spec/tokens/blinkengraphs.tokens.json"
+        ))
+    });
+    let light = LIGHT.get_or_init(|| {
+        parse(include_str!(
+            "../../../spec/tokens/blinkengraphs.light.tokens.json"
+        ))
+    });
+    let find =
+        |t: &'static Tokens| path.split('.').fold(&t["color"], |v, k| &v[k])["$value"].as_str();
+    let hex = (shade == Shade::Light)
+        .then(|| find(light))
+        .flatten()
+        .or_else(|| find(base))
+        .unwrap_or_else(|| panic!("spec token color.{path} missing"));
+    Rgb::try_from(hex.to_string()).unwrap_or_else(|e| panic!("color.{path}: {e}"))
+}
+
 fn index(s: Section) -> usize {
     Section::ALL.iter().position(|x| *x == s).unwrap()
 }
@@ -236,14 +274,6 @@ mod tests {
         assert_eq!(c, Rgb(0x4f, 0xc3, 0xf7));
         assert_eq!(String::from(c), "#4fc3f7");
         assert!(Rgb::try_from("4fc3f7".to_string()).is_err());
-    }
-
-    #[test]
-    fn default_dark_matches_spec_tokens() {
-        let p = Palette::new(Preset::Default, Shade::Dark, &Overrides::default());
-        assert_eq!(p.section(Section::Cpu), Rgb::hex(0x4fc3f7));
-        assert_eq!(p.section(Section::Latency), Rgb::hex(0xffd54f));
-        assert_eq!(p.crit, Rgb::hex(0xff5a5a));
     }
 
     #[test]

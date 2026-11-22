@@ -48,6 +48,7 @@ pub struct Defaults {
     pub hop_trace: HopTraceDefaults,
     pub history: HistoryDefaults,
     pub system_interval_ms: u64,
+    pub appearance: crate::Mode,
 }
 
 #[derive(Debug, Deserialize)]

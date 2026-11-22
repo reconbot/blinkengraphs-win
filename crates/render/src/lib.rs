@@ -32,9 +32,9 @@ pub enum Status {
 }
 
 /// Normalized Meter value at which bars turn amber.
-pub const WARN: f32 = 0.6;
+pub const WARN: f32 = palette::METER_WARN;
 /// Normalized Meter value at which bars turn red.
-pub const CRIT: f32 = 0.85;
+pub const CRIT: f32 = palette::METER_CRIT;
 
 /// Small and large rates both stay visible at 16 px (MenuMeters' default network scale).
 pub fn cube_root(value: f64, max: f64) -> f32 {

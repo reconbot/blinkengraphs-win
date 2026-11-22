@@ -69,7 +69,7 @@ impl Default for ProbeView {
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
-    /// The Panel's light or dark mode; Meters follow the taskbar instead.
+    /// Light or dark for every Surface and the Panel (spec `CONTEXT.md` Appearance).
     pub mode: Mode,
     pub preset: palette::Preset,
     #[serde(flatten)]
@@ -86,8 +86,18 @@ pub enum Mode {
 }
 
 impl Appearance {
-    pub fn palette(&self, shade: palette::Shade) -> palette::Palette {
-        palette::Palette::new(self.preset, shade, &self.overrides)
+    /// The chosen shade; with System, whatever the OS shows where this draws. For Meters that is
+    /// the taskbar, which Windows lets be light while apps are dark.
+    pub fn shade(&self, system: palette::Shade) -> palette::Shade {
+        match self.mode {
+            Mode::System => system,
+            Mode::Light => palette::Shade::Light,
+            Mode::Dark => palette::Shade::Dark,
+        }
+    }
+
+    pub fn palette(&self, system: palette::Shade) -> palette::Palette {
+        palette::Palette::new(self.preset, self.shade(system), &self.overrides)
     }
 }
 
@@ -389,7 +399,10 @@ impl Default for Config {
         Self {
             surface: Surface::TaskbarStrip,
             menu_icon: MenuIcon::App,
-            appearance: Appearance::default(),
+            appearance: Appearance {
+                mode: d.appearance,
+                ..Default::default()
+            },
             graph_aggregate: model::Aggregate::Avg,
             probe_views: Default::default(),
             sections: vec![
@@ -675,6 +688,17 @@ mod tests {
                 Section::Latency
             ]
         );
+    }
+
+    #[test]
+    fn a_chosen_theme_overrides_what_the_os_shows() {
+        use palette::Shade::{Dark, Light};
+        let mut a = Appearance::default();
+        assert_eq!((a.shade(Light), a.shade(Dark)), (Light, Dark));
+        a.mode = Mode::Dark;
+        assert_eq!(a.shade(Light), Dark);
+        a.mode = Mode::Light;
+        assert_eq!(a.shade(Dark), Light);
     }
 
     #[test]

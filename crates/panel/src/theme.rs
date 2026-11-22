@@ -1,4 +1,4 @@
-use config::{Appearance, Mode};
+use config::Appearance;
 use egui::{
     Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Frame, Margin, Stroke, Ui,
     Visuals,
@@ -77,9 +77,9 @@ pub fn probe(probe: &Probe, i: usize) -> Color32 {
 }
 
 pub fn level(s: Section, v: f32) -> Color32 {
-    if v >= 0.85 {
+    if v >= palette::METER_CRIT {
         crit()
-    } else if v >= 0.6 {
+    } else if v >= palette::METER_WARN {
         warn()
     } else {
         accent(s)
@@ -152,14 +152,10 @@ pub fn install(ctx: &egui::Context) {
 
 /// Rebuilds colors and visuals when the Appearance or Windows' app theme changes.
 pub fn apply(ctx: &egui::Context, a: &Appearance) {
-    let shade = match a.mode {
-        Mode::Light => Shade::Light,
-        Mode::Dark => Shade::Dark,
-        Mode::System => match ctx.system_theme() {
-            Some(egui::Theme::Light) => Shade::Light,
-            _ => Shade::Dark,
-        },
-    };
+    let shade = a.shade(match ctx.system_theme() {
+        Some(egui::Theme::Light) => Shade::Light,
+        _ => Shade::Dark,
+    });
     let pal = a.palette(shade);
     let id = egui::Id::unique("blinkengraphs-palette");
     PAL.with(|p| *p.borrow_mut() = pal.clone());
