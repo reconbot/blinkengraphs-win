@@ -33,7 +33,7 @@ jobs:
           sha=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
           # The screenshots workflow renders the same commit in parallel; give it 15 minutes.
           for _ in $(seq 90); do
-            gh api "repos/$GH_REPO/contents/$sha/tray-icons.png?ref=ci-screenshots" --silent 2>/dev/null && break
+            gh api "repos/$GH_REPO/contents/$sha?ref=ci-screenshots" --silent 2>/dev/null && break
             sleep 10
           done
           gh api "repos/$GH_REPO/contents/$sha?ref=ci-screenshots" --jq '[.[].name | select(endswith(".png"))]' > names.json
