@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.5.0...v2.0.0) (2026-11-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* history and RTTs follow spec 3.0.0: fixed-beat rounds, one percentile rank, whole-ms RTTs, minutes written once complete, graph seam where storage ends ([#38](https://github.com/reconbot/blinkengraphs-win/issues/38))
+
+### Features
+
+* history and RTTs follow spec 3.0.0: fixed-beat rounds, one percentile rank, whole-ms RTTs, minutes written once complete, graph seam where storage ends ([#38](https://github.com/reconbot/blinkengraphs-win/issues/38)) ([2bbb58a](https://github.com/reconbot/blinkengraphs-win/commit/2bbb58a82ffca8ec437d399aad6b266a0dac70f5))
+
 ## [1.5.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.4.0...v1.5.0) (2026-11-22)
 
 
