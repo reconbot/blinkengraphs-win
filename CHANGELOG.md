@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.2.0...v1.3.0) (2026-11-21)
+
+
+### Features
+
+* All history range and CSV export of every stored minute ([#12](https://github.com/reconbot/blinkengraphs-win/issues/12)) ([14acf3a](https://github.com/reconbot/blinkengraphs-win/commit/14acf3a96dbd74be3ef5f645badf70d4b3cff662))
+
+
+### Bug Fixes
+
+* save recent history on quit, show the running copy on relaunch, log crashes ([#14](https://github.com/reconbot/blinkengraphs-win/issues/14)) ([70a5efe](https://github.com/reconbot/blinkengraphs-win/commit/70a5efebeddf3d7707bda24a4be96bca3813850f))
+
 ## [1.2.0](https://github.com/reconbot/blinkengraphs-win/compare/v1.1.0...v1.2.0) (2026-11-21)
 
 
