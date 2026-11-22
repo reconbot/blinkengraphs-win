@@ -64,6 +64,8 @@ pub struct HopTraceDefaults {
     pub max_ttl: u8,
     pub full_sweep_every_s: u64,
     pub hop_window: usize,
+    /// Show Hop names from reverse DNS (spec `rules/hop-trace.md`, "Names").
+    pub reverse_dns: bool,
 }
 
 #[derive(Debug, Deserialize)]

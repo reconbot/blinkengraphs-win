@@ -596,7 +596,14 @@ mod tests {
                 .all(|p| p.protocol != Protocol::Dns)
         );
         assert!(g.dns_probes().iter().all(|p| p.protocol == Protocol::Dns));
-        assert_eq!(g.traces(), vec![probe(Protocol::Icmp, CLOUDFLARE)]);
+        let cloudflare_v6 = Target::Addr("2606:4700:4700::1111".parse().unwrap());
+        assert_eq!(
+            g.traces(),
+            vec![
+                probe(Protocol::Icmp, CLOUDFLARE),
+                probe(Protocol::Icmp, cloudflare_v6)
+            ]
+        );
     }
 
     #[test]

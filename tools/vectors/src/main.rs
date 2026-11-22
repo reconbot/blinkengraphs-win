@@ -67,6 +67,7 @@ struct Case {
     sample: Option<Sample>,
     probes: Vec<(Probe, ProbeStat)>,
     upload_peak_bps: f64,
+    path_up: bool,
 }
 
 fn verdict_vector(name: &str, c: &Case) -> Value {
@@ -74,6 +75,7 @@ fn verdict_vector(name: &str, c: &Case) -> Value {
         sample: c.sample.as_ref(),
         probes: &c.probes,
         upload_peak_bps: c.upload_peak_bps,
+        path_up: c.path_up,
     });
     let sample = c.sample.as_ref().map(|s| {
         Metric::ALL
@@ -81,15 +83,16 @@ fn verdict_vector(name: &str, c: &Case) -> Value {
             .map(|m| (format!("{m:?}"), json!(s.get(*m))))
             .collect::<serde_json::Map<_, _>>()
     });
-    json!({
-        "name": name,
-        "input": {
-            "sample": sample,
-            "probes": c.probes.iter().map(|(p, st)| json!({"probe": p, "stat": stat_json(st)})).collect::<Vec<_>>(),
-            "upload_peak_bps": c.upload_peak_bps,
-        },
-        "expected": findings,
-    })
+    let mut input = json!({
+        "sample": sample,
+        "probes": c.probes.iter().map(|(p, st)| json!({"probe": p, "stat": stat_json(st)})).collect::<Vec<_>>(),
+        "upload_peak_bps": c.upload_peak_bps,
+    });
+    // Absent means true, so the vectors written before the Offline rule stay valid.
+    if !c.path_up {
+        input["path_up"] = json!(false);
+    }
+    json!({"name": name, "input": input, "expected": findings})
 }
 
 fn verdict_cases() -> Vec<(&'static str, Case)> {
@@ -122,6 +125,7 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
                     sample,
                     probes,
                     upload_peak_bps: peak.round(),
+                    path_up: true,
                 },
             )
         })
@@ -160,6 +164,7 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
             sample: None,
             probes: ps,
             upload_peak_bps: 5e6,
+            path_up: true,
         }
     };
     cases.push((
@@ -171,6 +176,50 @@ fn verdict_cases() -> Vec<(&'static str, Case)> {
                 .map(|(p, _)| (p, st(1.0, 0.0, 10.0)))
                 .collect(),
             upload_peak_bps: 5e6,
+            path_up: true,
+        },
+    ));
+    let dual = |v4_loss: f32, v6_loss: f32| {
+        let mut ps: Vec<_> = healthy()
+            .into_iter()
+            .map(|(p, s)| {
+                let v4 = matches!(p.target, Target::Addr(a) if a.is_ipv4());
+                if v4 && p.protocol != Protocol::Dns && v4_loss > 0.0 {
+                    (p, st(v4_loss, 0.0, s.baseline_ms.unwrap()))
+                } else {
+                    (p, s)
+                }
+            })
+            .collect();
+        ps.push((
+            p(Protocol::Icmp, "2606:4700:4700::1111"),
+            st(v6_loss, 13.0, 13.0),
+        ));
+        ps.push((
+            p(Protocol::Tcp(443), "2606:4700:4700::1111"),
+            st(v6_loss, 14.0, 14.0),
+        ));
+        ps.push((p(Protocol::Icmp, "2620:fe::fe"), st(v6_loss, 15.0, 15.0)));
+        Case {
+            sample: None,
+            probes: ps,
+            upload_peak_bps: 5e6,
+            path_up: true,
+        }
+    };
+    cases.push(("dual-stack-clear", dual(0.0, 0.0)));
+    cases.push(("ipv6-broken", dual(0.0, 1.0)));
+    cases.push(("ipv4-broken", dual(1.0, 0.0)));
+    cases.push((
+        "offline",
+        Case {
+            sample: None,
+            probes: healthy()
+                .into_iter()
+                .map(|(p, _)| (p, st(1.0, 0.0, 10.0)))
+                .collect(),
+            upload_peak_bps: 5e6,
+            path_up: false,
         },
     ));
     cases.push((
