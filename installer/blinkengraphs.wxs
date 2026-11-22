@@ -1,0 +1,45 @@
+<!-- One MSI for per-user (no admin) or per-machine installs (ADR 0010). Build: see .github/workflows/ci.yml. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="blinkengraphs"
+           Manufacturer="blinkengraphs"
+           Version="$(Version)"
+           UpgradeCode="6f3b5c2e-8d41-4a7e-9b2a-1c0de5b16a70"
+           Scope="perUserOrMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer blinkengraphs is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/reconbot/blinkengraphs-win" />
+
+    <!-- WixUI_Advanced asks "Just me" or "Everyone"; per-user lands in %LocalAppData%\Programs. -->
+    <Property Id="ApplicationFolderName" Value="blinkengraphs" />
+    <Property Id="WixAppFolder" Value="WixPerUserFolder" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(License)" />
+    <ui:WixUI Id="WixUI_Advanced" />
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch blinkengraphs" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#exe]" />
+    <CustomAction Id="Launch" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="Launch"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="APPLICATIONFOLDER" Name="blinkengraphs">
+        <Component Id="App">
+          <File Id="exe" Source="$(Exe)" KeyPath="yes" />
+          <!-- HKMU follows the install scope: HKCU for Just me, HKLM for Everyone. -->
+          <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                         Name="blinkengraphs" Type="string" Value="&quot;[#exe]&quot;" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="Shortcut">
+        <Shortcut Id="StartMenu" Name="blinkengraphs" Target="[#exe]" WorkingDirectory="APPLICATIONFOLDER" />
+        <RegistryValue Root="HKMU" Key="Software\blinkengraphs" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+  </Package>
+</Wix>

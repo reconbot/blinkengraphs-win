@@ -72,6 +72,27 @@ jobs:
             echo "## tcp-hop spike (ADR 0002)"
             ./target/${{ matrix.target }}/release/tcp-hop.exe 1.1.1.1 443 15
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        name: MSI builds (ADR 0010)
+        shell: bash
+        run: installer/build.sh x64 target/${{ matrix.target }}/release/blinkengraphs.exe dist
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        name: MSI installs per-user, then uninstalls
+        shell: pwsh
+        run: |
+          $msi = (Resolve-Path dist/blinkengraphs-x64.msi).Path
+          function Msi($argv) {
+            $p = Start-Process msiexec -ArgumentList $argv -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60 -ErrorAction SilentlyContinue; throw "msiexec $argv exited $($p.ExitCode)" }
+          }
+          Msi "/i `"$msi`" /qn /l*v install.log MSIINSTALLPERUSER=1 ALLUSERS=2"
+          $exe = "$env:LOCALAPPDATA\Programs\blinkengraphs\blinkengraphs.exe"
+          if (-not (Test-Path $exe)) { Get-Content install.log -Tail 60; throw "missing $exe" }
+          $run = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name blinkengraphs
+          Write-Host "Run key: $run"
+          Msi "/x `"$msi`" /qn"
+          if (Test-Path $exe) { throw "uninstall left $exe" }
+          "MSI: $((Get-Item $msi).Length) bytes; per-user install and uninstall OK" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
       - name: size budget (ADR 0007)
         shell: bash
         run: |
