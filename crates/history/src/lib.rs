@@ -2,18 +2,23 @@ pub mod archive;
 pub mod pause;
 pub mod range;
 mod sketch;
+mod store;
 pub use archive::Row;
-use range::exact;
+pub use range::{GraphPoint, Range, State};
 pub use sketch::{Sketch, index as sketch_index, rep as sketch_rep};
 
+use archive::{Archive, written};
 use model::{Aggregate, HopResult, Metric, Probe, ProbeResult, ProbeStat, Sample};
-use rusqlite::{Connection, params};
-use std::collections::BTreeMap;
+use pause::{Pause, paused_s};
+use range::Sources;
+use rusqlite::Connection;
+use std::cell::RefCell;
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
     path::Path,
 };
+use store::Store;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -44,17 +49,6 @@ impl Key {
     }
 }
 
-/// One graph bucket starting at `at`: the chosen aggregate (NaN when nothing replied) and the lost fraction.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Point {
-    /// The bucket's start.
-    pub at: u64,
-    /// The bucket's width: whole minutes from storage, or the RAM bucket width.
-    pub secs: u64,
-    pub value: f32,
-    pub loss: f32,
-}
-
 /// One row of an mtr-style table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hop {
@@ -76,18 +70,19 @@ pub struct Summary {
 }
 
 /// How much History keeps and what "now" means. Callers fill it from the merged defaults
-/// (spec `defaults.json` `history` and `hop_trace`), plus the user's retention choices.
+/// (spec `defaults.json` `history` and `hop_trace`), plus the user's retention choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    pub ram_minutes: u32,
-    pub rollup_days: u32,
+    /// How far back Raw keeps results.
+    pub raw_s: u64,
+    /// A1, A2 and A3: `(step_s, rows kept)`. A3's Rows kept are the user's days.
+    pub archives: [(u64, u64); 3],
     /// Replies kept per Hop.
     pub hop_window: usize,
     /// The window "now" means for loss, RTT and the Verdict.
     pub recent_window_s: u64,
-    /// A minute is written once a result `60 + minute_grace_s` past its start arrives, so a
-    /// result that arrives a timeout after its `at` still counts (spec `rules/history.md`).
-    pub minute_grace_s: u64,
+    /// How long after its `at` a result can still arrive (`archive::grace_s`).
+    pub grace_s: u64,
 }
 
 #[derive(Default)]
@@ -97,94 +92,101 @@ struct HopTrack {
     reached: bool,
 }
 
+/// Rows of one key and Archive read from the store, kept while no step is written.
+struct Cached {
+    generation: u64,
+    from: u64,
+    archive: Archive,
+}
+
+/// Raw reaches disk this often, inside the spec's 10 s bound (spec `rules/history.md`, Raw).
+const RAW_WRITE_S: u64 = 5;
+
 pub struct History {
-    hop_window: usize,
-    recent_secs: u64,
-    minute_grace: u64,
-    ram_secs: u64,
-    rollup_secs: u64,
-    ram: HashMap<Key, VecDeque<(u64, Option<f32>)>>,
+    limits: Limits,
+    raw: HashMap<Key, VecDeque<(u64, Option<f32>)>>,
+    pauses: Vec<Pause>,
     hops: HashMap<Probe, Vec<HopTrack>>,
     last_sample: Option<Sample>,
-    db: Option<Connection>,
-    flushed_minute: u64,
+    store: Store,
+    unwritten: Vec<(String, u64, Option<f32>)>,
+    unwritten_pauses: Vec<Pause>,
+    raw_written_at: u64,
+    /// The newest `now` seen.
+    clock: u64,
+    /// Per Archive, the first step not yet written; `None` until the first result.
+    cursors: [Option<u64>; 3],
+    /// Bumped whenever a step is written, so cached Rows are reread.
+    generation: u64,
+    cache: RefCell<HashMap<(usize, Key), Cached>>,
     storage: Option<Storage>,
-    oldest_minute: Option<u64>,
 }
 
 /// What the history database holds now.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Storage {
     pub bytes: u64,
-    pub minutes: u64,
+    pub rows: u64,
 }
 
 /// Bytes per stored Row when the database is too young to measure (research 06, synthetic data).
-const BYTES_PER_MINUTE_ROW: f64 = 94.0;
+const BYTES_PER_ROW: f64 = 94.0;
 
-/// Disk needed to keep `days` of history for `series` keys, from the measured row size once there is enough data.
-pub fn estimate_bytes(series: usize, days: u32, measured: Option<Storage>) -> u64 {
+/// Disk needed to keep `days` of All for `series` keys, from the measured Row size once there is
+/// enough data. Each key holds A1 and A2 in full and one A3 Row a day.
+pub fn estimate_bytes(series: usize, limits: &Limits, days: u32, measured: Option<Storage>) -> u64 {
     let per_row = measured
-        .filter(|s| s.minutes >= 1000)
-        .map_or(BYTES_PER_MINUTE_ROW, |s| s.bytes as f64 / s.minutes as f64);
-    (series as f64 * days as f64 * 1440.0 * per_row) as u64
+        .filter(|s| s.rows >= 1000)
+        .map_or(BYTES_PER_ROW, |s| s.bytes as f64 / s.rows as f64);
+    let rows = limits.archives[0].1 + limits.archives[1].1 + days as u64;
+    (series as f64 * rows as f64 * per_row) as u64
 }
 
 impl History {
-    /// `db: None` keeps everything in RAM (tests, or a disk that refuses writes).
+    /// `db: None` keeps everything in memory (tests, or a disk that refuses writes).
     pub fn open(db: Option<&Path>, limits: Limits) -> Self {
-        let db = db.and_then(|p| {
-            if let Some(dir) = p.parent() {
-                std::fs::create_dir_all(dir).ok()?;
-            }
-            let c = Connection::open(p).ok()?;
-            c.execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 CREATE TABLE IF NOT EXISTS key (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
-                 CREATE TABLE IF NOT EXISTS minute (
-                   key INTEGER NOT NULL, minute INTEGER NOT NULL,
-                   n INTEGER NOT NULL, lost INTEGER NOT NULL,
-                   sum REAL, min REAL, max REAL, sk BLOB NOT NULL,
-                   PRIMARY KEY (key, minute)) WITHOUT ROWID;
-                 CREATE TABLE IF NOT EXISTS recent (
-                   key TEXT NOT NULL, at INTEGER NOT NULL, v REAL,
-                   PRIMARY KEY (key, at)) WITHOUT ROWID;",
-            )
-            .ok()?;
-            migrate_v1(&c);
-            Some(c)
-        });
+        let store = Store::open(db);
+        let now = model::now();
+        let cursors = [0, 1, 2].map(|i| store.cursor(i));
+        // Raw for steps not yet written is reloaded too, so a restart writes them.
+        let since = now.saturating_sub(limits.raw_s);
+        let since = cursors[0].map_or(since, |c| since.min(c.saturating_sub(1)));
         let mut h = Self {
-            hop_window: limits.hop_window,
-            recent_secs: limits.recent_window_s,
-            minute_grace: limits.minute_grace_s,
-            // A minute is written g s after it ends, from RAM, so RAM must outlast that.
-            ram_secs: (limits.ram_minutes as u64 * 60).max(61 + limits.minute_grace_s),
-            rollup_secs: limits.rollup_days as u64 * 86_400,
-            ram: HashMap::new(),
+            limits,
+            raw: HashMap::new(),
+            pauses: store.load_pauses(since as f64),
             hops: HashMap::new(),
             last_sample: None,
-            db,
-            flushed_minute: 0,
+            unwritten: Vec::new(),
+            unwritten_pauses: Vec::new(),
+            raw_written_at: 0,
+            clock: 0,
+            cursors,
+            generation: 0,
+            cache: RefCell::new(HashMap::new()),
             storage: None,
-            oldest_minute: None,
+            store,
         };
-        h.restore();
+        for (id, at, v) in h.store.load_raw(since) {
+            if let Some(key) = Key::from_id(&id) {
+                h.push(key, at, v);
+            }
+        }
+        h.storage = h.measure();
         h
     }
 
-    // Due minutes are written before pushing evicts their oldest results.
     pub fn record_sample(&mut self, s: &Sample) {
         self.maintain(s.at);
         for m in Metric::ALL {
-            self.push(Key::Metric(m), s.at, Some(s.get(m) as f32));
+            self.record(Key::Metric(m), s.at, Some(s.get(m) as f32));
         }
         self.last_sample = Some(s.clone());
     }
 
     pub fn record_probe(&mut self, r: &ProbeResult) {
         self.maintain(r.at);
-        self.push(Key::Probe(r.probe.clone()), r.at, r.rtt_ms);
+        self.record(Key::Probe(r.probe.clone()), r.at, r.rtt_ms);
     }
 
     pub fn record_hop(&mut self, h: &HopResult) {
@@ -199,7 +201,7 @@ impl History {
         }
         t.reached = h.reached;
         t.rtts.push_back(h.rtt_ms);
-        if t.rtts.len() > self.hop_window {
+        if t.rtts.len() > self.limits.hop_window {
             t.rtts.pop_front();
         }
         if h.reached {
@@ -208,7 +210,7 @@ impl History {
     }
 
     pub fn probes(&self) -> Vec<Probe> {
-        self.ram
+        self.raw
             .keys()
             .filter_map(|k| match k {
                 Key::Probe(p) => Some(p.clone()),
@@ -223,7 +225,7 @@ impl History {
 
     /// Newest last; `None` marks a loss. Pads nothing: may return fewer than `n`.
     pub fn recent(&self, key: &Key, n: usize) -> Vec<Option<f32>> {
-        self.ram
+        self.raw
             .get(key)
             .map(|q| {
                 q.iter()
@@ -237,14 +239,19 @@ impl History {
     /// The Probe's stats over the recent window (`Limits::recent_window_s`) back from `now`;
     /// `None` while that window is empty.
     pub fn now(&self, probe: &Probe, now: u64) -> Option<ProbeStat> {
-        let q = self.ram.get(&Key::Probe(probe.clone()))?;
+        let q = self.raw.get(&Key::Probe(probe.clone()))?;
         let results: Vec<_> = q.iter().copied().collect();
-        probe_stats(&results, now, self.recent_secs, self.ram_secs)
+        probe_stats(
+            &results,
+            now,
+            self.limits.recent_window_s,
+            self.limits.raw_s,
+        )
     }
 
     /// One value for `probe` over the `window_secs` back from `now`, with the share of Probes lost.
     pub fn aggregate(&self, probe: &Probe, now: u64, window_secs: u64, agg: Aggregate) -> Summary {
-        let Some(q) = self.ram.get(&Key::Probe(probe.clone())) else {
+        let Some(q) = self.raw.get(&Key::Probe(probe.clone())) else {
             return Summary::default();
         };
         let window: Vec<Option<f32>> = q
@@ -272,7 +279,7 @@ impl History {
 
     /// The Probe stats window, `Limits::recent_window_s`.
     pub fn window_s(&self) -> u64 {
-        self.recent_secs
+        self.limits.recent_window_s
     }
 
     pub fn hops(&self, trace: &Probe) -> Vec<Hop> {
@@ -304,200 +311,263 @@ impl History {
             .collect()
     }
 
-    /// Rollups for the part of `[since, until]` older than RAM, then raw RAM points.
-    /// `agg` per bucket of `bucket_secs` over `[since, until]`: Minutes from SQLite for the part older
-    /// than RAM (buckets rounded up to whole minutes there), exact raw values from RAM after that.
-    /// Graph points for `[since, until]` in buckets of `bucket_secs` (spec `rules/history.md`).
-    pub fn series(
-        &self,
-        key: &Key,
-        since: u64,
-        until: u64,
-        bucket_secs: u64,
-        agg: Aggregate,
-    ) -> Vec<Point> {
+    /// The points of `range` for `key` at `now`, from the range's one source (spec
+    /// `rules/history.md`, Graph ranges).
+    pub fn series(&self, key: &Key, range: Range, now: u64, agg: Aggregate) -> Vec<GraphPoint> {
+        // Graph no step the writer hasn't reached, so a step never reads as written but empty.
+        let now = if self.clock > 0 {
+            now.min(self.clock)
+        } else {
+            now
+        };
+        let level = match range.source() {
+            range::Source::Raw => 0,
+            range::Source::A1 => 1,
+            range::Source::A2 => 2,
+            range::Source::A3 => 3,
+        };
         let empty = VecDeque::new();
-        let ram = self.ram.get(key).unwrap_or(&empty);
-        // Without a database nothing is written, so RAM serves everything.
-        let c = if self.db.is_some() {
-            self.flushed_minute
-        } else {
-            0
+        let raw: Vec<(u64, Option<f32>)> = self
+            .raw
+            .get(key)
+            .unwrap_or(&empty)
+            .iter()
+            .copied()
+            .collect();
+        let mut archives: [Archive; 3] = Default::default();
+        for (i, a) in archives.iter_mut().enumerate() {
+            a.step = self.limits.archives[i].0;
+        }
+        if level > 0 {
+            let from = match range.span_s() {
+                Some(span) => now.saturating_sub(span),
+                None => 0,
+            };
+            archives[level - 1] = self.archive(level - 1, key, from);
+            // Steps the source hasn't written are built from the Archives below.
+            for l in (0..level - 1).rev() {
+                let from = self.cursors[l + 1]
+                    .unwrap_or(0)
+                    .min(now.saturating_sub(self.limits.archives[l + 1].0));
+                archives[l] = self.archive(l, key, from);
+            }
+        }
+        let src = Sources {
+            raw: &raw,
+            pauses: &self.pauses,
+            archives: [&archives[0], &archives[1], &archives[2]],
+            g: self.limits.grace_s,
         };
-        let stored = if since < c {
-            self.minutes(key, since / 60 * 60, c)
-        } else {
-            vec![]
-        };
-        buckets(
-            since,
-            until,
-            bucket_secs,
-            c,
-            ram.iter().copied(),
-            &stored,
-            agg,
-        )
+        range::graph(range, now, &src, agg)
     }
 
-    /// Saves what a restart would otherwise lose: the unfinished minute's rollup and the raw RAM samples.
+    /// Rows of `key` in Archive `level` from `from` on, from the cache or the store.
+    fn archive(&self, level: usize, key: &Key, from: u64) -> Archive {
+        let mut cache = self.cache.borrow_mut();
+        if let Some(c) = cache.get(&(level, key.clone()))
+            && c.generation == self.generation
+            && c.from <= from
+        {
+            return c.archive.clone();
+        }
+        let archive = Archive {
+            step: self.limits.archives[level].0,
+            rows: self.store.rows(level, &key.id(), from),
+            paused: self.store.paused(level, from),
+        };
+        cache.insert(
+            (level, key.clone()),
+            Cached {
+                generation: self.generation,
+                from,
+                archive: archive.clone(),
+            },
+        );
+        archive
+    }
+
+    /// Writes what is due and saves Raw, as a shutdown must.
     pub fn close(&mut self, now: u64) {
-        let from = self.flushed_minute;
-        let Some(db) = &mut self.db else { return };
-        let Ok(tx) = db.transaction() else { return };
-        let _ = tx.execute("DELETE FROM recent", []);
-        for (key, q) in &self.ram {
-            let id = key.id();
-            let mut minute: Vec<Option<f32>> = Vec::new();
-            let mut at = None;
-            for (t, v) in q {
-                let _ = tx.execute(
-                    "INSERT OR REPLACE INTO recent VALUES (?1, ?2, ?3)",
-                    params![id, *t as i64, v.map(f64::from)],
-                );
-                if *t >= from && *t <= now {
-                    if at.is_some_and(|a| a != t / 60 * 60) {
-                        flush_one(&tx, &id, at.unwrap(), &minute);
-                        minute.clear();
-                    }
-                    at = Some(t / 60 * 60);
-                    minute.push(*v);
-                }
-            }
-            if let Some(a) = at {
-                flush_one(&tx, &id, a, &minute);
-            }
-        }
-        let _ = tx.commit();
+        self.maintain(now);
+        self.write_raw();
     }
 
-    /// Reloads the raw samples `close` saved, then forgets them so they're read once.
-    fn restore(&mut self) {
-        let Some(db) = &self.db else { return };
-        let rows: Vec<(String, i64, Option<f64>)> = db
-            .prepare("SELECT key, at, v FROM recent ORDER BY at")
-            .and_then(|mut s| {
-                s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                    .map(|rows| rows.flatten().collect())
-            })
-            .unwrap_or_default();
-        let _ = db.execute("DELETE FROM recent", []);
-        let oldest = model::now().saturating_sub(self.ram_secs) as i64;
-        for (id, at, v) in rows.into_iter().filter(|r| r.1 >= oldest) {
-            if let Some(key) = Key::from_id(&id) {
-                self.push(key, at as u64, v.map(|v| v as f32));
-            }
-        }
-    }
-
-    /// Measured at each minute's flush; `None` without a database.
+    /// Measured whenever an A1 step is written; `None` without a database.
     pub fn storage(&self) -> Option<Storage> {
         self.storage
     }
 
-    /// Unix seconds of the oldest data held anywhere: SQLite as of the last flush, else RAM.
+    /// Unix seconds of the oldest data held: the oldest A3 Row, else Raw.
     pub fn oldest(&self) -> Option<u64> {
-        let ram = self
-            .ram
+        let raw = self
+            .raw
             .values()
             .filter_map(|q| q.front().map(|(t, _)| *t))
             .min();
-        match (self.oldest_minute, ram) {
+        match (self.store.oldest(2), raw) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
     }
 
-    pub fn set_rollup_days(&mut self, days: u32) {
-        self.rollup_secs = days.max(1) as u64 * 86_400;
+    /// The user's All retention: A3's Rows kept.
+    pub fn set_archive_days(&mut self, days: u32) {
+        self.limits.archives[2].1 = days.max(1) as u64;
     }
 
-    /// Stored Minutes for `key` in `[from, to)`, ascending.
-    pub fn minutes(&self, key: &Key, from: u64, to: u64) -> Vec<(u64, Row)> {
-        let Some(db) = &self.db else { return vec![] };
-        let mut stmt = db
-            .prepare_cached(
-                "SELECT m.minute, m.n, m.lost, m.sum, m.min, m.max, m.sk FROM minute m
-                 JOIN key k ON k.id = m.key
-                 WHERE k.name = ?1 AND m.minute >= ?2 AND m.minute < ?3 ORDER BY m.minute",
-            )
-            .expect("static SQL");
-        let rows = stmt.query_map(params![key.id(), from as i64, to as i64], |r| {
-            let sk: Vec<u8> = r.get(6)?;
-            Ok((
-                r.get::<_, i64>(0)? as u64,
-                Row {
-                    n: r.get::<_, i64>(1)? as u64,
-                    lost: r.get::<_, i64>(2)? as u64,
-                    sum: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                    min: r.get::<_, Option<f64>>(4)?.unwrap_or(f64::INFINITY),
-                    max: r.get::<_, Option<f64>>(5)?.unwrap_or(f64::NEG_INFINITY),
-                    sketch: Sketch::decode(&sk).unwrap_or_default(),
-                },
-            ))
-        });
-        rows.into_iter().flatten().flatten().collect()
+    fn record(&mut self, key: Key, at: u64, v: Option<f32>) {
+        if self.store.persistent() {
+            self.unwritten.push((key.id(), at, v));
+        }
+        self.push(key, at, v);
     }
 
     fn push(&mut self, key: Key, at: u64, v: Option<f32>) {
-        let q = self.ram.entry(key).or_default();
-        // Rounds of different Probe Groups can report out of order; keep RAM in time order.
+        let q = self.raw.entry(key).or_default();
+        // Rounds of different Probe Groups can report out of order; keep Raw in time order.
         let i = q.iter().rposition(|(t, _)| *t <= at).map_or(0, |i| i + 1);
         q.insert(i, (at, v));
-        // Keep at + ram > newest: exactly `ram` back is gone (spec `rules/history.md`, RAM).
-        while q.front().is_some_and(|(t, _)| *t + self.ram_secs <= at) {
-            q.pop_front();
+    }
+
+    /// Ages out Raw, writes every Archive step that is due, and saves Raw when it is time.
+    fn maintain(&mut self, now: u64) {
+        self.clock = self.clock.max(now);
+        let now = self.clock;
+        for level in 0..3 {
+            self.write_due(level, now);
+        }
+        let keep = self.raw_floor();
+        for q in self.raw.values_mut() {
+            while q.front().is_some_and(|(t, _)| *t < keep) {
+                q.pop_front();
+            }
+        }
+        self.pauses.retain(|p| p.end > keep as f64);
+        if now >= self.raw_written_at + RAW_WRITE_S {
+            self.write_raw();
         }
     }
 
-    /// Writes one Rollup per key for every minute that can get no more results.
-    fn maintain(&mut self, now: u64) {
-        let minute = now.saturating_sub(self.minute_grace) / 60 * 60;
-        if self.flushed_minute == 0 {
-            self.flushed_minute = minute;
+    /// The oldest `at` Raw keeps: `at > now − raw_s`, and every A1 step not yet written.
+    fn raw_floor(&self) -> u64 {
+        let floor = (self.clock + 1).saturating_sub(self.limits.raw_s);
+        self.cursors[0].map_or(floor, |c| floor.min(c))
+    }
+
+    fn write_raw(&mut self) {
+        let oldest = self.raw_floor().saturating_sub(1);
+        self.store
+            .write_raw(&self.unwritten, &self.unwritten_pauses, oldest);
+        self.unwritten.clear();
+        self.unwritten_pauses.clear();
+        self.raw_written_at = self.clock;
+    }
+
+    /// Writes each step of Archive `level` that is due by `now`, skipping stretches with nothing in them.
+    fn write_due(&mut self, level: usize, now: u64) {
+        let (step, rows) = self.limits.archives[level];
+        let g = self.limits.grace_s;
+        let first = if level == 0 {
+            self.raw
+                .values()
+                .filter_map(|q| q.front().map(|(t, _)| *t))
+                .min()
+        } else {
+            self.cursors[level - 1]
+        };
+        let Some(cursor) = self.cursors[level].or(first.map(|t| t / step * step)) else {
             return;
-        }
-        if minute <= self.flushed_minute {
-            return;
-        }
-        let (from, to) = (self.flushed_minute, minute);
-        self.flushed_minute = minute;
-        let Some(db) = &mut self.db else { return };
-        let Ok(tx) = db.transaction() else { return };
-        for (key, q) in &self.ram {
-            let mut buckets: BTreeMap<u64, Vec<Option<f32>>> = BTreeMap::new();
-            for (t, v) in q.iter().filter(|(t, _)| (from..to).contains(t)) {
-                buckets.entry(t / 60 * 60).or_default().push(*v);
-            }
-            if buckets.is_empty() {
+        };
+        self.cursors[level] = Some(cursor);
+        let mut wrote = false;
+        while let Some(m) = self.cursors[level].filter(|m| written(*m, step, now, g)) {
+            let next = self.next_data(level, m).map(|t| t / step * step);
+            // The last step due is the one ending g s or more before now.
+            let after_due = (now - g - step) / step * step + step;
+            let target = next.unwrap_or(after_due).min(after_due);
+            if target > m {
+                self.cursors[level] = Some(target);
                 continue;
             }
-            let _ = tx.execute(
-                "INSERT OR IGNORE INTO key (name) VALUES (?1)",
-                params![key.id()],
-            );
-            for (at, vs) in buckets {
-                write_minute(&tx, &key.id(), at, &Row::of(&vs));
+            self.write_step(level, m);
+            self.cursors[level] = Some(m + step);
+            wrote = true;
+        }
+        if wrote {
+            // Rows go once `m + step ≤ now − rows × step` (spec `rules/history.md`, Archives).
+            if let Some(limit) = now.checked_sub((rows + 1) * step) {
+                self.store.retain(level, limit + 1);
+            }
+            self.generation += 1;
+            if level == 0 {
+                self.storage = self.measure();
             }
         }
-        let _ = tx.execute(
-            "DELETE FROM minute WHERE minute < ?1",
-            params![now.saturating_sub(self.rollup_secs) as i64],
-        );
-        let _ = tx.commit();
-        let one = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0) as u64;
-        self.storage = Some(Storage {
-            bytes: one("PRAGMA page_count").saturating_sub(one("PRAGMA freelist_count"))
-                * one("PRAGMA page_size"),
-            minutes: one("SELECT COUNT(*) FROM minute"),
-        });
-        self.oldest_minute = db
-            .query_row("SELECT MIN(minute) FROM minute", [], |r| {
-                r.get::<_, Option<i64>>(0)
-            })
-            .ok()
-            .flatten()
-            .map(|m| m as u64);
+    }
+
+    /// The first time at or after `m` with anything for Archive `level` to write.
+    fn next_data(&self, level: usize, m: u64) -> Option<u64> {
+        if level > 0 {
+            return self.store.next_step(level - 1, m);
+        }
+        let raw = self
+            .raw
+            .values()
+            .filter_map(|q| q.iter().find(|(t, _)| *t >= m).map(|(t, _)| *t))
+            .min();
+        let paused = self
+            .pauses
+            .iter()
+            .filter(|p| p.end > m as f64)
+            .map(|p| (p.begin.max(m as f64)) as u64)
+            .min();
+        raw.into_iter().chain(paused).min()
+    }
+
+    fn write_step(&mut self, level: usize, m: u64) {
+        let step = self.limits.archives[level].0;
+        let (rows, paused): (Vec<(String, Row)>, f64) = if level == 0 {
+            let rows = self
+                .raw
+                .iter()
+                .filter_map(|(key, q)| {
+                    let vs: Vec<Option<f32>> = q
+                        .iter()
+                        .filter(|(t, _)| (m..m + step).contains(t))
+                        .map(|(_, v)| *v)
+                        .collect();
+                    (!vs.is_empty()).then(|| (key.id(), Row::of(&vs)))
+                })
+                .collect();
+            (rows, paused_s(&self.pauses, m as f64, (m + step) as f64))
+        } else {
+            let rows = self
+                .store
+                .rows_in(level - 1, m, m + step)
+                .into_iter()
+                .map(|(key, rs)| {
+                    let mut acc = Row::default();
+                    for (_, r) in &rs {
+                        acc.merge(r);
+                    }
+                    (key, acc)
+                })
+                .collect();
+            let paused = self
+                .store
+                .paused(level - 1, m)
+                .into_iter()
+                .filter(|(x, _)| *x < m + step)
+                .map(|(_, s)| s)
+                .sum();
+            (rows, paused)
+        };
+        self.store.write_step(level, m, &rows, paused, m + step);
+    }
+
+    fn measure(&self) -> Option<Storage> {
+        let (bytes, rows) = self.store.measure()?;
+        Some(Storage { bytes, rows })
     }
 }
 
@@ -537,7 +607,7 @@ pub fn probe_stats(
     })
 }
 
-/// Writes every stored Row of every key to `out` as CSV, reading `db` through its own connection
+/// Writes every Archive Row of every key to `out` as CSV, reading `db` through its own connection
 /// so the engine keeps sampling. Returns the number of rows.
 pub fn export_csv(db: &Path, out: &Path) -> std::io::Result<u64> {
     use std::io::Write;
@@ -546,34 +616,24 @@ pub fn export_csv(db: &Path, out: &Path) -> std::io::Result<u64> {
         Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
     let mut stmt = c
         .prepare(
-            "SELECT k.name, m.minute, m.n, m.lost, m.sum, m.min, m.max, m.sk FROM minute m
-             JOIN key k ON k.id = m.key ORDER BY k.name, m.minute",
+            "SELECT k.name, r.archive, r.m, r.n, r.lost, r.sum, r.min, r.max, r.sk FROM row r
+             JOIN key k ON k.id = r.key ORDER BY k.name, r.archive, r.m",
         )
         .map_err(err)?;
     let mut rows = stmt.query([]).map_err(err)?;
     let mut w = std::io::BufWriter::new(std::fs::File::create(out)?);
     writeln!(
         w,
-        "series,minute_utc,unix,samples,lost,loss,avg,min,max,p50,p95,p99"
+        "series,archive,start_utc,unix,samples,lost,loss,avg,min,max,p50,p95,p99"
     )?;
     let mut count = 0;
     while let Some(r) = rows.next().map_err(err)? {
-        let sk: Vec<u8> = r.get(7).map_err(err)?;
-        let m = Row {
-            n: r.get::<_, i64>(2).map_err(err)? as u64,
-            lost: r.get::<_, i64>(3).map_err(err)? as u64,
-            sum: r.get::<_, Option<f64>>(4).map_err(err)?.unwrap_or(0.0),
-            min: r
-                .get::<_, Option<f64>>(5)
-                .map_err(err)?
-                .unwrap_or(f64::INFINITY),
-            max: r
-                .get::<_, Option<f64>>(6)
-                .map_err(err)?
-                .unwrap_or(f64::NEG_INFINITY),
-            sketch: Sketch::decode(&sk).unwrap_or_default(),
-        };
-        let at = r.get::<_, i64>(1).map_err(err)? as u64;
+        let m = store::row(r, 3).map_err(err)?;
+        let archive = ["A1", "A2", "A3"]
+            .get(r.get::<_, i64>(1).map_err(err)? as usize)
+            .copied()
+            .unwrap_or("?");
+        let at = r.get::<_, i64>(2).map_err(err)? as u64;
         let name: String = r.get(0).map_err(err)?;
         let v = |a| m.value(a).map(|v| format!("{v}")).unwrap_or_default();
         let bound = |v: f64| {
@@ -585,7 +645,7 @@ pub fn export_csv(db: &Path, out: &Path) -> std::io::Result<u64> {
         };
         writeln!(
             w,
-            "{},{},{at},{},{},{},{},{},{},{},{},{}",
+            "{},{archive},{},{at},{},{},{},{},{},{},{},{},{}",
             csv_field(&name),
             utc(at),
             m.n,
@@ -632,157 +692,6 @@ fn utc(secs: u64) -> String {
     )
 }
 
-fn flush_one(c: &Connection, key: &str, at: u64, values: &[Option<f32>]) {
-    let _ = c.execute("INSERT OR IGNORE INTO key (name) VALUES (?1)", params![key]);
-    write_minute(c, key, at, &Row::of(values));
-}
-
-/// A graph's RAM bucket width for a span shown in up to 240 points (spec `rules/history.md`).
-pub fn bucket_width(span_secs: u64) -> u64 {
-    (span_secs / 240).max(1)
-}
-
-/// Graph points (spec `rules/history.md`, "Graph buckets"). `written` is where storage hands
-/// over to RAM: every minute before it is written, none from it on. Stored Minutes before it go
-/// in whole-minute buckets and RAM results from it on in `w`-second buckets, both aligned to
-/// the epoch, so nothing is counted twice or left out.
-pub fn buckets(
-    since: u64,
-    until: u64,
-    w: u64,
-    written: u64,
-    ram: impl Iterator<Item = (u64, Option<f32>)>,
-    stored: &[(u64, Row)],
-    agg: Aggregate,
-) -> Vec<Point> {
-    let w = w.max(1);
-    let c = written;
-    let mut out = Vec::new();
-    let big = w.div_ceil(60) * 60;
-    let mut cur: Option<(u64, Row)> = None;
-    for (m, minute) in stored.iter().filter(|(m, _)| since <= m + 59 && *m < c) {
-        let start = m / big * big;
-        match &mut cur {
-            Some((s, acc)) if *s == start => acc.merge(minute),
-            _ => {
-                if let Some((s, acc)) = cur.take() {
-                    out.push(point(s, big, &acc, agg));
-                }
-                cur = Some((start, minute.clone()));
-            }
-        }
-    }
-    if let Some((s, acc)) = cur {
-        out.push(point(s, big, &acc, agg));
-    }
-    let mut cur: Option<(u64, Vec<Option<f32>>)> = None;
-    let mut flush = |c: Option<(u64, Vec<Option<f32>>)>| {
-        if let Some((s, vs)) = c {
-            let lost = vs.iter().filter(|v| v.is_none()).count() as f32 / vs.len() as f32;
-            out.push(Point {
-                at: s,
-                secs: w,
-                value: exact(&vs, agg).map_or(f32::NAN, |v| v as f32),
-                loss: lost,
-            });
-        }
-    };
-    for (t, v) in ram.filter(|(t, _)| (since.max(c)..=until).contains(t)) {
-        let start = t / w * w;
-        match &mut cur {
-            Some((s, vs)) if *s == start => vs.push(v),
-            _ => {
-                flush(cur.take());
-                cur = Some((start, vec![v]));
-            }
-        }
-    }
-    flush(cur);
-    out
-}
-
-fn point(at: u64, secs: u64, m: &Row, agg: Aggregate) -> Point {
-    Point {
-        at,
-        secs,
-        value: m.value(agg).map_or(f32::NAN, |v| v as f32),
-        loss: m.loss(),
-    }
-}
-
-fn write_minute(c: &Connection, key: &str, at: u64, m: &Row) {
-    let some = |v: f64| (m.n > 0).then_some(v);
-    let _ = c.execute(
-        "INSERT OR REPLACE INTO minute
-         SELECT id, ?2, ?3, ?4, ?5, ?6, ?7, ?8 FROM key WHERE name = ?1",
-        params![
-            key,
-            at as i64,
-            m.n as i64,
-            m.lost as i64,
-            some(m.sum),
-            some(m.min),
-            some(m.max),
-            m.sketch.encode()
-        ],
-    );
-}
-
-/// v1.x stored min/mean/max/loss per minute. Each becomes a Row holding its mean once, so old
-/// history still graphs (percentiles of it read as the mean) until it ages out of the rollup window.
-/// key, minute, min, mean, max, loss
-type V1Row = (String, i64, Option<f64>, Option<f64>, Option<f64>, f64);
-
-fn migrate_v1(c: &Connection) {
-    let old: Vec<V1Row> = c
-        .prepare("SELECT key, minute, min, mean, max, loss FROM rollup")
-        .and_then(|mut s| {
-            s.query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            })
-            .map(|rows| rows.flatten().collect())
-        })
-        .unwrap_or_default();
-    if old.is_empty() {
-        let _ = c.execute_batch("DROP TABLE IF EXISTS rollup;");
-        return;
-    }
-    let Ok(tx) = c.unchecked_transaction() else {
-        return;
-    };
-    for (key, at, min, mean, max, loss) in old {
-        let _ = tx.execute("INSERT OR IGNORE INTO key (name) VALUES (?1)", params![key]);
-        let m = match mean {
-            Some(mean) => {
-                let mut sketch = Sketch::default();
-                sketch.add(mean);
-                Row {
-                    n: 1,
-                    lost: (loss / (1.0 - loss).max(1e-9)).round() as u64,
-                    sum: mean,
-                    min: min.unwrap_or(mean),
-                    max: max.unwrap_or(mean),
-                    sketch,
-                }
-            }
-            None => Row {
-                lost: 1,
-                ..Row::default()
-            },
-        };
-        write_minute(&tx, &key, at as u64, &m);
-    }
-    let _ = tx.execute_batch("DROP TABLE rollup;");
-    let _ = tx.commit();
-}
-
 /// The X-th percentile of `v`: sorted, the element at `⌊(n − 1) × X / 100⌋` in integer
 /// arithmetic, the one rank every percentile uses (spec `rules/probe-stats.md`).
 fn percentile(mut v: Vec<f32>, x: usize) -> Option<f32> {
@@ -798,13 +707,13 @@ mod tests {
     use super::*;
     use model::{Protocol, Target};
 
-    fn limits(ram_minutes: u32, rollup_days: u32) -> Limits {
+    fn limits() -> Limits {
         Limits {
-            ram_minutes,
-            rollup_days,
+            raw_s: 7200,
+            archives: [(300, 288), (3600, 168), (86_400, 365)],
             hop_window: 60,
             recent_window_s: 30,
-            minute_grace_s: 2,
+            grace_s: 2,
         }
     }
 
@@ -813,6 +722,10 @@ mod tests {
             target: Target::Addr("1.1.1.1".parse().unwrap()),
             protocol: Protocol::Icmp,
         }
+    }
+
+    fn key() -> Key {
+        Key::Probe(probe())
     }
 
     fn feed(h: &mut History, from: u64, to: u64, f: impl Fn(u64) -> Option<f32>) {
@@ -825,9 +738,35 @@ mod tests {
         }
     }
 
+    /// A temporary database path, removed when dropped.
+    struct TempDb(std::path::PathBuf);
+
+    impl TempDb {
+        fn new(name: &str) -> TempDb {
+            let p = std::env::temp_dir().join(format!("bg-{name}-{}.db", std::process::id()));
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", p.display()));
+            }
+            TempDb(p)
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", self.0.display()));
+            }
+        }
+    }
+
+    /// An hour before now, on a day boundary's 5-minute grid, so reopening keeps it in Raw.
+    fn recent_start() -> u64 {
+        (model::now() - 3600) / 300 * 300
+    }
+
     #[test]
     fn aggregate_over_window() {
-        let mut h = History::open(None, limits(15, 7));
+        let mut h = History::open(None, limits());
         feed(&mut h, 1000, 1300, |t| {
             (t % 10 != 0).then_some((t % 100) as f32)
         });
@@ -844,7 +783,7 @@ mod tests {
 
     #[test]
     fn stat_reports_loss_and_baseline() {
-        let mut h = History::open(None, limits(15, 7));
+        let mut h = History::open(None, limits());
         feed(&mut h, 0, 600, |_| Some(10.0));
         feed(&mut h, 600, 630, |t| (t % 2 == 0).then_some(80.0));
         let s = h.now(&probe(), 629).unwrap();
@@ -854,65 +793,121 @@ mod tests {
     }
 
     #[test]
-    fn ram_is_bounded() {
-        let mut h = History::open(None, limits(1, 7));
-        feed(&mut h, 0, 500, |_| Some(1.0));
-        // One minute is raised to 61 + grace s, so minutes are written before eviction.
-        assert_eq!(h.recent(&Key::Probe(probe()), 1000).len(), 63);
+    fn raw_keeps_two_hours() {
+        let mut h = History::open(None, limits());
+        feed(&mut h, 0, 3 * 3600, |_| Some(1.0));
+        let kept = h.recent(&key(), usize::MAX).len() as u64;
+        // Two hours, plus the A1 step not yet written and its grace.
+        assert!((7200..7200 + 300 + 2).contains(&kept), "{kept}");
     }
 
     #[test]
-    fn rollups_serve_ranges_older_than_ram() {
-        let path = std::env::temp_dir().join(format!("bg-history-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let mut h = History::open(Some(&path), limits(1, 7));
-        feed(&mut h, 6000, 6000 + 600, |t| {
-            if t < 6060 {
-                None
-            } else {
-                Some((t % 60) as f32)
-            }
-        });
-        let key = Key::Probe(probe());
-        let pts = h.series(&key, 6000, 6600, 60, Aggregate::Max);
-        let first = pts.first().unwrap();
-        assert_eq!(first.at, 6000);
-        assert_eq!(first.loss, 1.0);
-        assert!(first.value.is_nan());
-        let rolled = pts.iter().find(|p| p.at == 6120).unwrap();
-        assert_eq!(rolled.value, 59.0);
-        assert!(pts.last().unwrap().at >= 6540);
-        let two = h.series(&key, 6060, 6180, 120, Aggregate::Avg);
-        assert_eq!(two[0].at, 6000);
-        assert_eq!(two[1].at, 6120);
-        assert_eq!(two[1].value, 29.5);
-        let p95 = h.series(&key, 6120, 6180, 60, Aggregate::P95)[0].value;
-        assert!((p95 - 56.0).abs() / 56.0 <= 1.0 / 65.0, "{p95}");
-        drop(h);
-        let _ = std::fs::remove_file(&path);
+    fn closed_points_never_change() {
+        let mut h = History::open(None, limits());
+        feed(&mut h, 0, 3600, |t| Some((t % 97) as f32));
+        let before = h.series(&key(), Range::Day, 3600, Aggregate::P95);
+        feed(&mut h, 3600, 4800, |t| Some((t % 89) as f32));
+        let after = h.series(&key(), Range::Day, 4800, Aggregate::P95);
+        let closed: Vec<_> = before.iter().filter(|p| !p.provisional).collect();
+        assert_eq!(closed.len(), 11);
+        for p in closed {
+            assert_eq!(after.iter().find(|q| q.at == p.at), Some(p));
+        }
+    }
+
+    #[test]
+    fn archives_build_up_and_a3_serves_all() {
+        let mut h = History::open(None, limits());
+        // Every 10 s for three days.
+        for t in (0..3 * 86_400).step_by(10) {
+            h.record_probe(&ProbeResult {
+                probe: probe(),
+                at: t,
+                rtt_ms: Some(20.0),
+            });
+        }
+        let week = h.series(&key(), Range::Week, 3 * 86_400, Aggregate::Max);
+        assert_eq!(week.iter().filter(|p| !p.provisional).count(), 71);
+        let all = h.series(&key(), Range::All, 3 * 86_400, Aggregate::Max);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].value, Some(20.0));
+        assert!(all[2].provisional);
+        assert_eq!(h.oldest(), Some(0));
+    }
+
+    #[test]
+    fn raw_and_archives_survive_a_kill() {
+        let db = TempDb::new("kill");
+        let t0 = recent_start();
+        {
+            let mut h = History::open(Some(&db.0), limits());
+            feed(&mut h, t0, t0 + 900, |_| Some(12.0));
+            // Dropped without close, as a kill or hibernate leaves it.
+        }
+        let h = History::open(Some(&db.0), limits());
+        // Raw reached disk within RAW_WRITE_S of the last result.
+        let kept = h.recent(&key(), usize::MAX).len() as u64;
+        assert!(kept + RAW_WRITE_S >= 900, "{kept}");
+        let day = h.series(&key(), Range::Day, t0 + 900, Aggregate::Max);
+        assert_eq!(day.iter().filter(|p| !p.provisional).count(), 2);
+        assert!(day.iter().all(|p| p.value == Some(12.0)));
+    }
+
+    #[test]
+    fn a_restart_writes_the_steps_it_missed() {
+        let db = TempDb::new("restart");
+        let t0 = recent_start();
+        {
+            let mut h = History::open(Some(&db.0), limits());
+            feed(&mut h, t0, t0 + 250, |_| Some(5.0));
+            h.close(t0 + 250);
+        }
+        let mut h = History::open(Some(&db.0), limits());
+        feed(&mut h, t0 + 700, t0 + 701, |_| Some(5.0));
+        let day = h.series(&key(), Range::Day, t0 + 701, Aggregate::Max);
+        let first = day.first().unwrap();
+        assert_eq!((first.at, first.provisional), (t0, false));
+    }
+
+    #[test]
+    fn an_older_database_starts_empty() {
+        let db = TempDb::new("old");
+        {
+            let c = Connection::open(&db.0).unwrap();
+            c.execute_batch("CREATE TABLE minute (key INTEGER, minute INTEGER);")
+                .unwrap();
+        }
+        let _h = History::open(Some(&db.0), limits());
+        let c = Connection::open(&db.0).unwrap();
+        let minute: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'minute'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(minute, 0);
     }
 
     #[test]
     fn storage_is_measured_and_estimated() {
-        let path = std::env::temp_dir().join(format!("bg-history-size-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let mut h = History::open(Some(&path), limits(1, 7));
-        assert_eq!(h.storage(), None);
-        feed(&mut h, 6000, 6000 + 300, |t| Some((t % 7) as f32));
+        let db = TempDb::new("size");
+        let mut h = History::open(Some(&db.0), limits());
+        let t0 = recent_start();
+        feed(&mut h, t0, t0 + 610, |t| Some((t % 7) as f32));
         let s = h.storage().unwrap();
-        assert_eq!(s.minutes, 4);
+        assert_eq!(s.rows, 2);
         assert!(s.bytes > 0);
+        let rows = 288 + 168 + 7;
         assert_eq!(
-            estimate_bytes(20, 7, Some(s)),
-            (20.0 * 7.0 * 1440.0 * 94.0) as u64
+            estimate_bytes(20, &limits(), 7, Some(s)),
+            (20.0 * rows as f64 * 94.0) as u64
         );
         let big = Storage {
             bytes: 2_000_000,
-            minutes: 20_000,
+            rows: 20_000,
         };
-        assert_eq!(estimate_bytes(10, 1, Some(big)), 1_440_000);
-        drop(h);
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(estimate_bytes(10, &limits(), 1, Some(big)), 457 * 10 * 100);
     }
 
     #[test]
@@ -923,97 +918,25 @@ mod tests {
     }
 
     #[test]
-    fn export_writes_every_minute() {
-        let dir = std::env::temp_dir().join(format!("bg-export-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = dir.join("h.db");
-        let out = dir.join("h.csv");
-        let mut h = History::open(Some(&db), limits(1, 7));
-        feed(&mut h, 6000, 6000 + 300, |t| {
+    fn export_writes_every_row() {
+        let db = TempDb::new("export");
+        let out = db.0.with_extension("csv");
+        let mut h = History::open(Some(&db.0), limits());
+        let t0 = recent_start();
+        feed(&mut h, t0, t0 + 610, |t| {
             (t % 30 != 0).then_some((t % 7) as f32)
         });
-        assert_eq!(h.oldest(), Some(6000));
-        let rows = export_csv(&db, &out).unwrap();
-        assert_eq!(rows, 4);
-        let text = std::fs::read_to_string(&out).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[0].starts_with("series,minute_utc,unix,"));
-        assert!(
-            lines[1].starts_with("probe:icmp 1.1.1.1,1970-01-01T01:40:00Z,6000,58,2,"),
-            "{}",
-            lines[1]
-        );
-        drop(h);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn close_keeps_recent_samples_and_the_unfinished_minute() {
-        let path = std::env::temp_dir().join(format!("bg-history-close-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let key = Key::Probe(probe());
-        let t0 = (model::now() - 200) / 60 * 60;
-        {
-            let mut h = History::open(Some(&path), limits(15, 7));
-            feed(&mut h, t0, t0 + 150, |t| {
-                (!(t - t0).is_multiple_of(50)).then_some((t % 9) as f32)
-            });
-            h.close(t0 + 150);
-        }
-        let h = History::open(Some(&path), limits(15, 7));
-        let raw = h.recent(&key, 1000);
-        assert_eq!(raw.len(), 150, "1 s samples survive a restart");
-        assert_eq!(raw[0], None);
-        let minutes = h.minutes(&key, t0, t0 + 200);
-        assert_eq!(
-            minutes.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
-            [t0, t0 + 60, t0 + 120]
-        );
-        assert_eq!(
-            minutes[2].1.n + minutes[2].1.lost,
-            30,
-            "the unfinished minute is stored"
-        );
-        drop(h);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn ram_buckets_are_exact() {
-        let mut h = History::open(None, limits(15, 7));
-        feed(&mut h, 1000, 1010, |t| Some((t - 1000) as f32));
-        let pts = h.series(&Key::Probe(probe()), 1000, 1009, 5, Aggregate::P50);
-        assert_eq!(pts.len(), 2);
-        assert_eq!((pts[0].at, pts[0].value), (1000, 2.0));
-        assert_eq!((pts[1].at, pts[1].value), (1005, 7.0));
-    }
-
-    #[test]
-    fn v1_rollups_migrate() {
-        let path = std::env::temp_dir().join(format!("bg-history-v1-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        {
-            let c = Connection::open(&path).unwrap();
-            c.execute_batch(
-                "CREATE TABLE rollup (key TEXT NOT NULL, minute INTEGER NOT NULL,
-                   min REAL, mean REAL, max REAL, loss REAL NOT NULL,
-                   PRIMARY KEY (key, minute)) WITHOUT ROWID;
-                 INSERT INTO rollup VALUES ('probe:icmp 1.1.1.1', 6000, 10, 12, 20, 0.5);",
-            )
-            .unwrap();
-        }
-        let h = History::open(Some(&path), limits(1, 7));
-        let m = h.minutes(&Key::Probe(probe()), 6000, 6060);
-        assert_eq!(m.len(), 1);
-        assert_eq!((m[0].1.n, m[0].1.lost, m[0].1.max), (1, 1, 20.0));
-        assert_eq!(m[0].1.value(Aggregate::Avg), Some(12.0));
-        drop(h);
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(export_csv(&db.0, &out).unwrap(), 2);
+        let csv = std::fs::read_to_string(&out).unwrap();
+        let first = csv.lines().nth(1).unwrap();
+        assert!(first.starts_with("probe:icmp 1.1.1.1,A1,"), "{first}");
+        assert!(first.contains(",290,10,"), "{first}");
+        let _ = std::fs::remove_file(&out);
     }
 
     #[test]
     fn hops_truncate_at_destination() {
-        let mut h = History::open(None, limits(15, 7));
+        let mut h = History::open(None, limits());
         for ttl in 1..=5u8 {
             h.record_hop(&HopResult {
                 trace: probe(),

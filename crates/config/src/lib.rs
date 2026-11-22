@@ -359,14 +359,12 @@ impl ProbeGroup {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistoryConfig {
-    pub ram_minutes: u32,
-    pub rollup_days: u32,
+    /// How many days the All range keeps: A3's Rows (spec `rules/history.md`, Archives).
+    pub archive_days: u32,
 }
 
 impl HistoryConfig {
     pub const MAX_DAYS: u32 = 365;
-    /// Minutes stay on disk this long until Archives replace them (#40).
-    const MINUTE_DAYS: u32 = 7;
 }
 
 impl Config {
@@ -384,12 +382,13 @@ impl Config {
     /// What History keeps: the user's retention, the spec's windows.
     pub fn history_limits(&self) -> history::Limits {
         let d = defaults::get();
+        let a = |i: usize| (d.history.archives[i].step_s, d.history.archives[i].rows);
         history::Limits {
-            ram_minutes: self.history.ram_minutes,
-            rollup_days: self.history.rollup_days,
+            raw_s: d.history.raw_minutes as u64 * 60,
+            archives: [a(0), a(1), (a(2).0, self.history.archive_days as u64)],
             hop_window: d.hop_trace.hop_window,
             recent_window_s: d.history.recent_window_s,
-            minute_grace_s: d.max_timeout_ms.div_ceil(1000) + 1,
+            grace_s: history::archive::grace_s(d.max_timeout_ms),
         }
     }
 }
@@ -398,8 +397,7 @@ impl Default for HistoryConfig {
     fn default() -> Self {
         let h = defaults::get().history;
         Self {
-            ram_minutes: h.raw_minutes,
-            rollup_days: Self::MINUTE_DAYS,
+            archive_days: h.archives[2].rows as u32,
         }
     }
 }
@@ -489,8 +487,8 @@ impl Config {
             }
             self.groups = vec![merged];
         }
-        self.history.rollup_days = self.history.rollup_days.clamp(1, HistoryConfig::MAX_DAYS);
-        let ram = self.history.ram_minutes as u64 * 60;
+        self.history.archive_days = self.history.archive_days.clamp(1, HistoryConfig::MAX_DAYS);
+        let ram = defaults::get().history.raw_minutes as u64 * 60;
         for v in self.probe_views.values_mut() {
             v.window_secs = v.window_secs.clamp(1, ram.max(1));
         }

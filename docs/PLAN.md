@@ -21,7 +21,7 @@ Budget: under 1% CPU and about 30 MB RAM when idle with the Panel closed. These 
 | Hop Trace | Continuous, at 1 s by default. ICMP needs no admin. TCP depends on the M0 spike. UDP traces come from the companion service ([ADR 0008](adr/0008-elevated-extras-via-companion-service.md)) |
 | Verdict | Rule-based, shown at the top of the Panel and in the tooltip |
 | Processes | Process Snapshot only while the Panel is open ([ADR 0003](adr/0003-process-snapshot-only-while-panel-open.md)) |
-| History | 15 min of Samples in RAM, plus 7 days of Rollups in SQLite |
+| History | Raw for 2 hours, then 5-minute, hourly and daily Archives in SQLite ([ADR 0018](adr/0018-history-is-raw-plus-archives.md)) |
 | Alerts | None in v1; Meters change color when thresholds are crossed |
 | Panel UI | egui + egui_plot with a custom dark theme and Mica; opens with a configurable global hotkey |
 | Dev loop | Cross-compile on Linux (`cargo-xwin`); GitHub Actions on Windows builds, tests and takes screenshots; no local Windows builds |
@@ -68,7 +68,7 @@ Platform-neutral crates build, test and render on Linux; only `collect`, `probe`
 crates/
   model/     Section, Metric, Sample, Probe, Target, ProbeStat, Hop types
   config/    TOML schema, defaults, load/save
-  history/   RAM ring + SQLite Rollups; probe stats; mtr hop rows
+  history/   Raw, Pauses and Archives in SQLite; graph ranges; probe stats; mtr hop rows
   verdict/   diagnose(Input) -> Vec<Finding>
   collect/   Collector: PDH, GetIfEntry2, NtQuerySystemInformation
   probe/     Prober: ICMP (IcmpSendEcho2), TCP connect, UDP DNS, hop traces
