@@ -79,11 +79,13 @@ pub fn run() {
             .with_position([-32000.0, -32000.0]),
         ..Default::default()
     };
-    let _ = eframe::run_native(
+    if let Err(e) = eframe::run_native(
         "blinkengraphs",
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, config, error, path)))),
-    );
+    ) {
+        crash_log(&format!("window failed to start: {e}"));
+    }
 }
 
 struct App {
@@ -692,23 +694,23 @@ fn watch_session_end(on_end: impl Fn() + Send + 'static) {
 
 /// Release builds abort on panic with no console, so the reason is otherwise lost.
 fn install_crash_log() {
-    let path = config::dir().join("crash.log");
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(
-                f,
-                "{} v{} {info}\n{}",
-                model::now(),
-                env!("CARGO_PKG_VERSION"),
-                std::backtrace::Backtrace::force_capture()
-            );
-        }
+        crash_log(&format!(
+            "{info}\n{}",
+            std::backtrace::Backtrace::force_capture()
+        ));
         default(info);
     }));
+}
+
+fn crash_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config::dir().join("crash.log"))
+    {
+        let _ = writeln!(f, "{} v{} {msg}", model::now(), env!("CARGO_PKG_VERSION"));
+    }
 }
