@@ -117,11 +117,10 @@ fn icmp_to_localhost_replies() {
         target: Target::Addr(LOCALHOST),
         protocol: Protocol::Icmp,
     };
-    let (_prober, rx) = Prober::start(vec![group(
-        vec![icmp.clone()],
-        vec![icmp.clone()],
+    let (_prober, rx) = Prober::start(
+        vec![group(vec![icmp.clone()], vec![icmp.clone()])],
         limits(),
-    )]);
+    );
     let r = next_probe(&rx);
     assert_eq!(r.probe, icmp);
     assert!(r.rtt_ms.is_some());
