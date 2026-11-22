@@ -51,8 +51,10 @@ pub struct Icmp {
     v6: Option<HANDLE>,
 }
 
-// The ICMP handles are kernel object handles, usable from any thread.
+// The ICMP handles are kernel object handles, usable from any thread, and each batch
+// brings its own events and buffers, so concurrent batches don't share state.
 unsafe impl Send for Icmp {}
+unsafe impl Sync for Icmp {}
 
 impl Drop for Icmp {
     fn drop(&mut self) {
