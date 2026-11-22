@@ -1,8 +1,9 @@
+pub mod defaults;
+
 use model::{Metric, Ping, Probe, Protocol, Readout, Section, Target};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
-    net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
 };
 
@@ -357,18 +358,12 @@ impl HistoryConfig {
 
 impl Default for HistoryConfig {
     fn default() -> Self {
+        let h = defaults::get().history;
         Self {
-            ram_minutes: 15,
-            rollup_days: 7,
+            ram_minutes: h.ram_minutes,
+            rollup_days: h.rollup_days,
         }
     }
-}
-
-const CLOUDFLARE: Target = Target::Addr(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
-const GOOGLE: Target = Target::Addr(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
-
-fn probe(protocol: Protocol, target: Target) -> Probe {
-    Probe { target, protocol }
 }
 
 impl Default for Config {
@@ -385,14 +380,12 @@ impl Default for Config {
             SectionConfig::new(list[0].section(), &r, &r, &r)
         };
         let ping = [Readout::Ping(Ping::Latency), Readout::Ping(Ping::Loss)];
-        let row = |target, icmp, tcp, dns, trace| TargetRow {
-            target,
-            icmp,
-            tcp,
-            udp: None,
-            dns,
-            trace,
-        };
+        let d = defaults::get();
+        let g = d.probe_group;
+        let mut group = ProbeGroup::new(g.name, g.targets);
+        group.latency_ms = g.latency_ms;
+        group.dns_ms = g.dns_ms;
+        group.trace_ms = g.trace_ms;
         Self {
             surface: Surface::TaskbarStrip,
             menu_icon: MenuIcon::App,
@@ -407,18 +400,10 @@ impl Default for Config {
                 SectionConfig::new(Section::Latency, &ping, &ping, &ping),
             ],
             adapter: Adapter::FollowDefaultRoute,
-            system_interval_ms: 1000,
+            system_interval_ms: d.system_interval_ms,
             process_interval_ms: 1000,
-            primary: probe(Protocol::Icmp, CLOUDFLARE),
-            groups: vec![ProbeGroup::new(
-                "Default",
-                vec![
-                    row(Target::Gateway, true, None, false, false),
-                    row(CLOUDFLARE, true, Some(443), true, true),
-                    row(GOOGLE, true, Some(443), false, false),
-                    row(Target::SystemResolver, false, None, true, false),
-                ],
-            )],
+            primary: d.primary,
+            groups: vec![group],
             hotkey: "Ctrl+Alt+B".into(),
             history: HistoryConfig::default(),
             pause_when_idle: true,
@@ -531,6 +516,13 @@ pub fn dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    const CLOUDFLARE: Target = Target::Addr(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+
+    fn probe(protocol: Protocol, target: Target) -> Probe {
+        Probe { target, protocol }
+    }
 
     #[test]
     fn default_round_trips() {

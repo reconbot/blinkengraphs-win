@@ -2,7 +2,9 @@
 
 Project memory lives in the repo: decisions `docs/adr/`, plan `docs/PLAN.md`, research `docs/research/`. Record learnings there.
 
-Vocabulary, Verdict rules, test vectors and design tokens live in the spec repo, reconbot/blinkengraphs. Rule changes start there; regenerate its `vectors/` and `fixtures/` with `cargo run -p vectors -- <spec checkout>`. `SPEC_VERSION` pins the spec release CI must regenerate exactly; bump it in a PR when the spec releases (spec `docs/sync.md`).
+Vocabulary, Verdict rules, test vectors, design tokens and shared defaults live in the spec repo, reconbot/blinkengraphs, checked out at `spec/` as a submodule on a release tag. Rule changes start there; regenerate its `vectors/`, `fixtures/` and `tokens/` with `cargo run -p vectors -- <spec checkout>`. CI regenerates against the submodule and expects no diff; bump the submodule in a PR when the spec releases (spec `docs/sync.md`).
+
+Defaults: `config::defaults` embeds `spec/defaults.json` and merges `defaults.override.json` over it (spec `rules/defaults.md`). Override a default there, with the reason in an ADR.
 
 Skills (`mattpocock-skills`): `domain-modeling` when a term or decision changes, `codebase-design` when shaping a module interface, `tdd` for features and fixes, `writing-for-agents` for any doc or CLAUDE.md edit.
 
