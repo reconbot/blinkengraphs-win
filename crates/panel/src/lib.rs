@@ -823,8 +823,9 @@ struct Window {
 }
 
 /// Names the graph aggregate in the plot's top-right corner (spec `rules/graph-aggregate.md`).
-fn aggregate_tag(pu: &mut egui_plot::PlotUi, w: Window) {
-    let top = pu.plot_bounds().max()[1];
+/// `top` must come from the data: a Text item counts toward the auto-fitted bounds, so placing
+/// it at the plot's own top edge grows the axis by the margin every frame, without limit.
+fn aggregate_tag(pu: &mut egui_plot::PlotUi, w: Window, top: f64) {
     pu.text(
         egui_plot::Text::new(
             "",
@@ -834,6 +835,15 @@ fn aggregate_tag(pu: &mut egui_plot::PlotUi, w: Window) {
         .anchor(egui::Align2::RIGHT_TOP)
         .color(theme::text_weak()),
     );
+}
+
+/// The highest value the plot must show: its points and any fixed maximum, never less than 0.
+fn data_top<'a>(series: impl Iterator<Item = &'a [Point]>, max: Option<f64>) -> f64 {
+    series
+        .flatten()
+        .filter_map(|p| p.value)
+        .chain(max)
+        .fold(0.0, f64::max)
 }
 
 /// One line per run of adjacent buckets with values: a missing, lost or Paused bucket breaks
@@ -935,7 +945,7 @@ fn sparkplot(
     plot.show(ui, |pu| {
         unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
         states(pu, w, series.iter().map(|s| s.2.as_slice()));
-        aggregate_tag(pu, w);
+        aggregate_tag(pu, w, data_top(series.iter().map(|s| s.2.as_slice()), max));
         for (name, color, pts) in &series {
             for l in to_lines(name, *color, pts, true, w) {
                 pu.line(l);
@@ -958,7 +968,7 @@ fn multiplot(
         .show(ui, |pu| {
             unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
             states(pu, w, series.iter().map(|s| s.2.as_slice()));
-            aggregate_tag(pu, w);
+            aggregate_tag(pu, w, data_top(series.iter().map(|s| s.2.as_slice()), None));
             for x in markers {
                 pu.vline(
                     egui_plot::VLine::new("Link changed", *x)
@@ -1012,8 +1022,14 @@ fn unrecorded<'a>(
     }
 }
 
+/// One id per plot name, so its memory (bounds) can be found again.
+fn plot_id(name: &str) -> egui::Id {
+    egui::Id::unique(("plot", name))
+}
+
 fn base_plot(id: &str, height: f32, w: Window) -> Plot<'static> {
     Plot::new(id.to_owned())
+        .id(plot_id(id))
         .include_x(-w.secs)
         .include_x(0.0)
         .height(height)
@@ -1035,6 +1051,41 @@ pub fn severity_dot(s: Severity) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plot_keeps_its_axis_however_many_frames_it_draws() {
+        let mut h = History::open(None, config::Config::default().history_limits());
+        let now = 1_800_000_000;
+        fixtures::populate(&mut h, &fixtures::all().remove(2), now);
+        let mut config = config::Config::default();
+        let mut panel = Panel::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(vec2(460.0, 1080.0))
+            .allow_missing_glyphs()
+            .with_accessibility_check(false)
+            .build_ui(|ui| {
+                let view = View {
+                    history: &h,
+                    findings: &[],
+                    processes: &[],
+                    adapters: &[],
+                    links: &[],
+                    now,
+                    elevated: false,
+                    config_error: None,
+                    notice: None,
+                };
+                panel.show(ui, &view, &mut config);
+            });
+        harness.run_steps(300);
+        let top = |ctx: &egui::Context| {
+            egui_plot::PlotMemory::load(ctx, plot_id("latency")).map(|m| m.bounds().max()[1])
+        };
+        let ctx = harness.ctx.clone();
+        let y = top(&ctx).expect("the latency plot drew");
+        // The fixture's slowest reply is about 130 ms; 8% margin on top of that is all.
+        assert!(y < 1000.0, "latency axis grew to {y}");
+    }
 
     #[test]
     fn reselecting_the_open_tab_scrolls_to_top() {

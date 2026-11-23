@@ -171,7 +171,15 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View, export: &mut bool) ->
             .push(ProbeGroup::new(format!("Group {n}"), vec![row]));
     }
 
+    ui.add_space(12.0);
+    ui.label(RichText::new(version()).small().weak());
+
     *config != before
+}
+
+/// The workspace version, which release-please sets for every crate at once.
+fn version() -> String {
+    format!("blinkengraphs {}", env!("CARGO_PKG_VERSION"))
 }
 
 const MONITOR_WIDTHS: [f32; 4] = [0.0, 44.0, 44.0, 44.0];
@@ -512,6 +520,17 @@ fn probe_port(on: bool, port: u16) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_is_the_release_s() {
+        let workspace = include_str!("../../../Cargo.toml");
+        let want = workspace
+            .lines()
+            .find_map(|l| l.strip_prefix("version = \""))
+            .and_then(|l| l.split('"').next())
+            .unwrap();
+        assert_eq!(version(), format!("blinkengraphs {want}"));
+    }
 
     #[test]
     fn an_unticked_port_measures_nothing() {

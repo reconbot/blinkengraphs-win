@@ -282,8 +282,16 @@ struct Monitor<S> {
 }
 
 impl<S: Sensors> Monitor<S> {
-    fn new(config: Config, shared: Arc<Mutex<Shared>>, sensors: S, idle: IdleCheck) -> Self {
-        let (prober, events) = Prober::start(groups(&config), config.probe_limits());
+    fn new(config: Config, shared: Arc<Mutex<Shared>>, mut sensors: S, idle: IdleCheck) -> Self {
+        // Links first, so the first Rounds already go out on them.
+        let links = sensors.links();
+        let (prober, events) = Prober::start(groups_on(&config, &links), config.probe_limits());
+        {
+            let mut s = shared.lock().unwrap();
+            let f = followed(&config, &links);
+            s.history.set_followed(f, model::now());
+            s.links = links;
+        }
         let now = Instant::now();
         Self {
             config,
@@ -364,7 +372,14 @@ impl<S: Sensors> Monitor<S> {
         if s.history.cut(r.start, r.end) {
             return;
         }
-        s.history.record_round(r.link.as_ref(), &r.probes, &r.hops);
+        // A Round sent with no Link went where the OS routed it: the default-route Link.
+        let link = r.link.or_else(|| {
+            s.links
+                .iter()
+                .find(|l| l.default_route)
+                .map(|l| l.id.clone())
+        });
+        s.history.record_round(link.as_ref(), &r.probes, &r.hops);
     }
 
     /// Takes up the Links up now: on a change, every Probe Group runs on each of them, and
