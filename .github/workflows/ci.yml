@@ -74,6 +74,10 @@ jobs:
             echo "## tcp-hop spike (ADR 0002)"
             ./target/${{ matrix.target }}/release/tcp-hop.exe 1.1.1.1 443 15
           } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        name: linkcheck (research 08)
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/linkcheck.exe --label "CI runner" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: exe size (ADR 0007)
         shell: bash
         run: |
@@ -97,4 +101,5 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/blinkengraphs.exe
             target/${{ matrix.target }}/release/tcp-hop.exe
+            target/${{ matrix.target }}/release/linkcheck.exe
 
