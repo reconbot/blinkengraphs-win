@@ -48,6 +48,11 @@ impl Collector {
         self.inner.adapters()
     }
 
+    /// The Links' adapters, by NET_LUID; each Sample's `link_rates` covers them.
+    pub fn set_links(&mut self, luids: Vec<u64>) {
+        self.inner.set_links(luids);
+    }
+
     /// All Metric values; rates over the time since the previous call.
     pub fn sample(&mut self) -> Sample {
         let mut s = self.inner.sample();

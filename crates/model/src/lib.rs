@@ -215,6 +215,18 @@ pub struct Sample {
     pub disks: Vec<Disk>,
     #[serde(default)]
     pub pressure: Pressure,
+    /// Throughput of each Link's adapter (spec `docs/history-redesign.md`, Links).
+    #[serde(default)]
+    pub link_rates: Vec<LinkRate>,
+}
+
+/// One Link adapter's throughput over the Sample's interval, bytes/s.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinkRate {
+    /// The adapter's NET_LUID, as in its `LinkId`.
+    pub luid: u64,
+    pub down: f64,
+    pub up: f64,
 }
 
 /// One physical disk's load.

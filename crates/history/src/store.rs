@@ -12,6 +12,17 @@ use std::path::Path;
 /// starts empty when it moves to Raw and Archives).
 const SCHEMA: i64 = 2;
 
+/// One write of Raw (`Store::write_raw`).
+pub(crate) struct RawWrite<'a> {
+    pub results: &'a [(String, u64, Option<f32>)],
+    pub pauses: &'a [Pause],
+    /// Hop results by series, a Probe key's id naming the trace and its Link.
+    pub hops: &'a [(String, model::HopResult)],
+    pub links: &'a [(u64, Option<model::LinkId>)],
+    pub oldest: u64,
+    pub now: u64,
+}
+
 pub(crate) struct Store {
     db: Option<Connection>,
     /// In-memory Rows, `(archive, key) → m → Row`, when there is no database.
@@ -58,6 +69,11 @@ impl Store {
                    PRIMARY KEY (archive, m)) WITHOUT ROWID;
                  CREATE TABLE IF NOT EXISTS cursor (archive INTEGER PRIMARY KEY, m INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS mark (one INTEGER PRIMARY KEY CHECK (one = 1), at INTEGER NOT NULL);
+                 CREATE TABLE IF NOT EXISTS hop (
+                   series TEXT NOT NULL, at INTEGER NOT NULL, ttl INTEGER NOT NULL,
+                   addr TEXT, rtt REAL, reached INTEGER NOT NULL);
+                 CREATE INDEX IF NOT EXISTS hop_at ON hop (at);
+                 CREATE TABLE IF NOT EXISTS link_change (at INTEGER NOT NULL, link TEXT);
                  PRAGMA user_version = {SCHEMA};"
             ))
             .ok()?;
@@ -119,22 +135,18 @@ impl Store {
 
     /// Appends Raw results and records Pauses in one transaction, and drops Raw and Pauses
     /// older than `oldest`.
-    /// Also records a mark at `now`: measuring went on, though nothing else may be in this
-    /// write (spec `rules/history.md`, Raw). Only the newest mark matters, so one row holds it.
-    pub fn write_raw(
-        &mut self,
-        results: &[(String, u64, Option<f32>)],
-        pauses: &[Pause],
-        oldest: u64,
-        now: u64,
-    ) {
+    /// Appends one write's worth of Raw in one transaction: results, Pauses, Hop results and
+    /// Link changes, plus a mark at `now`, then drops what is older than `oldest`. The mark
+    /// says measuring went on even when nothing else is in the write (spec `rules/history.md`,
+    /// Raw); only the newest matters, so one row holds it.
+    pub fn write_raw(&mut self, w: &RawWrite) {
         let Some(c) = &mut self.db else { return };
         let Ok(tx) = c.transaction() else { return };
         let _ = tx.execute(
             "INSERT OR REPLACE INTO mark VALUES (1, ?1)",
-            params![now as i64],
+            params![w.now as i64],
         );
-        for (key, at, v) in results {
+        for (key, at, v) in w.results {
             self.seq += 1;
             let _ = tx.execute("INSERT OR IGNORE INTO key (name) VALUES (?1)", params![key]);
             let _ = tx.execute(
@@ -142,15 +154,87 @@ impl Store {
                 params![key, *at as i64, self.seq, v.map(f64::from)],
             );
         }
-        for p in pauses {
+        for p in w.pauses {
             let _ = tx.execute(
                 "INSERT OR REPLACE INTO pause VALUES (?1, ?2)",
                 params![p.begin, p.end],
             );
         }
-        let _ = tx.execute("DELETE FROM raw WHERE at <= ?1", params![oldest as i64]);
+        for (series, h) in w.hops {
+            let _ = tx.execute(
+                "INSERT INTO hop VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    series,
+                    h.at as i64,
+                    h.ttl as i64,
+                    h.addr.map(|a| a.to_string()),
+                    h.rtt_ms.map(f64::from),
+                    h.reached as i64
+                ],
+            );
+        }
+        for (at, link) in w.links {
+            let _ = tx.execute(
+                "INSERT INTO link_change VALUES (?1, ?2)",
+                params![*at as i64, link.as_ref().map(|l| l.to_string())],
+            );
+        }
+        let oldest = w.oldest as i64;
+        let _ = tx.execute("DELETE FROM raw WHERE at <= ?1", params![oldest]);
         let _ = tx.execute("DELETE FROM pause WHERE end <= ?1", params![oldest as f64]);
+        let _ = tx.execute("DELETE FROM hop WHERE at <= ?1", params![oldest]);
+        // Keep the change that set the oldest Raw's Link.
+        let _ = tx.execute(
+            "DELETE FROM link_change WHERE at < (SELECT MAX(at) FROM link_change WHERE at <= ?1)",
+            params![oldest],
+        );
         let _ = tx.commit();
+    }
+
+    /// Hop results with `at > since`, oldest first, by series (a Probe key's id).
+    pub fn load_hops(&self, since: u64) -> Vec<(String, model::HopResult)> {
+        let Some(c) = &self.db else { return vec![] };
+        c.prepare(
+            "SELECT series, at, ttl, addr, rtt, reached FROM hop WHERE at > ?1 ORDER BY at, rowid",
+        )
+        .and_then(|mut s| {
+            s.query_map(params![since as i64], |r| {
+                let addr: Option<String> = r.get(3)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    model::HopResult {
+                        trace: model::Probe {
+                            target: model::Target::Gateway,
+                            protocol: model::Protocol::Icmp,
+                        },
+                        at: r.get::<_, i64>(1)? as u64,
+                        ttl: r.get::<_, i64>(2)? as u8,
+                        addr: addr.and_then(|a| a.parse().ok()),
+                        rtt_ms: r.get::<_, Option<f64>>(4)?.map(|v| v as f32),
+                        reached: r.get::<_, i64>(5)? != 0,
+                    },
+                ))
+            })
+            .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default()
+    }
+
+    /// Link changes, oldest first.
+    pub fn load_link_changes(&self) -> Vec<(u64, Option<model::LinkId>)> {
+        let Some(c) = &self.db else { return vec![] };
+        c.prepare("SELECT at, link FROM link_change ORDER BY at, rowid")
+            .and_then(|mut s| {
+                s.query_map([], |r| {
+                    let link: Option<String> = r.get(1)?;
+                    Ok((
+                        r.get::<_, i64>(0)? as u64,
+                        link.and_then(|l| l.parse().ok()),
+                    ))
+                })
+                .map(|rows| rows.flatten().collect())
+            })
+            .unwrap_or_default()
     }
 
     /// The newest mark: when measuring was last known to go on.

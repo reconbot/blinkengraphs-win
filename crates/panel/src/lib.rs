@@ -280,7 +280,7 @@ impl Panel {
                     (0, _) => accent(section),
                     _ => theme::series(i),
                 };
-                (m.label(), color, self.points(view, &Key::Metric(*m)))
+                (m.label(), color, self.points(view, &self.metric_key(*m)))
             })
             .collect();
         let fmt = move |v: f64| match primary.unit() {
@@ -403,6 +403,15 @@ impl Panel {
                 ui.label(RichText::new(text).small().color(theme::probe(p, i)));
             }
         });
+    }
+
+    /// Throughput is the picked Link's adapter when one is picked, else the Followed Adapter's;
+    /// every other Metric belongs to the machine.
+    fn metric_key(&self, m: Metric) -> Key {
+        match (&self.link, m) {
+            (Some(l), Metric::NetDown | Metric::NetUp) => Key::LinkMetric(l.clone(), m),
+            _ => Key::Metric(m),
+        }
     }
 
     /// Every (Link, Probe) the latency graph draws: one line per Link by default, or the
@@ -1290,6 +1299,23 @@ mod tests {
         assert_eq!(link_alias(&up.id, &links), "Wi-Fi");
         assert_eq!(link_alias(&before, &links), "Wi-Fi (earlier)");
         assert_eq!(link_alias(&gone, &links), "earlier network");
+    }
+
+    #[test]
+    fn a_picked_link_s_throughput_is_its_own() {
+        let l = LinkId {
+            luid: 2,
+            gateway: None,
+            gateway_mac: None,
+        };
+        let mut p = Panel::default();
+        assert_eq!(p.metric_key(Metric::NetDown), Key::Metric(Metric::NetDown));
+        p.link = Some(l.clone());
+        assert_eq!(
+            p.metric_key(Metric::NetUp),
+            Key::LinkMetric(l, Metric::NetUp)
+        );
+        assert_eq!(p.metric_key(Metric::CpuBusy), Key::Metric(Metric::CpuBusy));
     }
 
     #[test]

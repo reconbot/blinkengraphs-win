@@ -112,6 +112,35 @@ impl NetTracker {
     }
 }
 
+/// Rates for every Link's adapter, each from its own previous reading.
+#[derive(Default)]
+pub struct LinkTracker {
+    per: HashMap<u64, NetTracker>,
+}
+
+impl LinkTracker {
+    /// `now` is each adapter's NET_LUID and counters. An adapter's first reading, or its first
+    /// after it was missing, has no rate yet and is left out.
+    pub fn update(&mut self, now: Vec<(u64, NetCounters)>, secs: f64) -> Vec<model::LinkRate> {
+        self.per
+            .retain(|luid, _| now.iter().any(|(l, _)| l == luid));
+        let mut out = Vec::new();
+        for (luid, counters) in now {
+            let t = self.per.entry(luid).or_default();
+            let fresh = t.last.is_none();
+            let r = t.update(Some((luid, counters)), secs);
+            if !fresh {
+                out.push(model::LinkRate {
+                    luid,
+                    down: r.down,
+                    up: r.up,
+                });
+            }
+        }
+        out
+    }
+}
+
 pub struct ProcCounters {
     pub pid: u32,
     /// Distinguishes a reused pid.
@@ -185,6 +214,25 @@ impl ProcTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_link_gets_its_own_rates_from_its_second_reading() {
+        let c = |rx, tx| NetCounters { rx, tx, errors: 0 };
+        let mut t = LinkTracker::default();
+        assert_eq!(t.update(vec![(1, c(100, 10))], 1.0), []);
+        let got = t.update(vec![(1, c(1100, 60)), (2, c(5, 5))], 2.0);
+        assert_eq!(
+            got,
+            [model::LinkRate {
+                luid: 1,
+                down: 500.0,
+                up: 25.0
+            }]
+        );
+        // Link 1 went away and came back: its first reading after that has no rate yet.
+        assert_eq!(t.update(vec![(2, c(7, 7))], 1.0).len(), 1);
+        assert_eq!(t.update(vec![(1, c(9000, 9000))], 1.0), []);
+    }
 
     #[test]
     fn disks_pair_idle_with_response_and_drop_the_total() {
