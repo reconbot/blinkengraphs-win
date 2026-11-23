@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.2.0](https://github.com/reconbot/blinkengraphs-win/compare/v4.1.0...v4.2.0) (2026-11-23)
+
+
+### Features
+
+* Hop rows and Link changes kept in Raw; throughput per Link ([#58](https://github.com/reconbot/blinkengraphs-win/issues/58)) ([979d11a](https://github.com/reconbot/blinkengraphs-win/commit/979d11a79b03ea1573d2601377ae7359b1043242))
+* tools/linkcheck measures routes, pinned sends and resume timing on a real machine ([#60](https://github.com/reconbot/blinkengraphs-win/issues/60)) ([73991fa](https://github.com/reconbot/blinkengraphs-win/commit/73991faecd0a85f23a653e133f84efa4c5c8dcb4))
+
 ## [4.1.0](https://github.com/reconbot/blinkengraphs-win/compare/v4.0.0...v4.1.0) (2026-11-23)
 
 
