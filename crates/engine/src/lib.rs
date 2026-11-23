@@ -31,6 +31,8 @@ pub struct Shared {
     pub adapters: Vec<String>,
     /// The Links being measured now.
     pub links: Vec<model::Link>,
+    /// The Public Address, IPv4 then IPv6 (spec `rules/public-address.md`).
+    pub public: Option<[probe::public::Reading; 2]>,
     pub paused: bool,
     /// Bumped on every new Sample so Surfaces redraw once per Sample.
     pub sample_count: u64,
@@ -82,6 +84,7 @@ impl Engine {
             processes: vec![],
             adapters: vec![],
             links: vec![],
+            public: None,
             paused: false,
             sample_count: 0,
         }));
@@ -447,6 +450,8 @@ impl<S: Sensors> Monitor<S> {
                 v.retain(|p| p.end > wall - 60.0);
             }
             self.prober.reconfigure(groups_on(&self.config, &links));
+            // The way out may have changed (spec `rules/public-address.md`, Refresh).
+            self.sensors.refresh_public();
             s.links = links;
         }
         let f = followed(&self.config, &s.links);
@@ -523,6 +528,7 @@ impl<S: Sensors> Monitor<S> {
         }
         if let Some(a) = adapters {
             s.adapters = a;
+            s.public = self.sensors.public_address();
         }
         s.findings = diagnose(&s.history, &net, at, &probe_order(&self.config), &s.links);
         s.sample_count += 1;

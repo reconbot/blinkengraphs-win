@@ -140,6 +140,14 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
         let order = engine::probe_order(&config::Config::default());
         let findings = engine::diagnose(&h, &engine::Network::default(), NOW, &order, &[]);
         let processes = fixtures::processes();
+        // Documentation addresses (RFC 5737, RFC 3849), as the screenshots show no real network.
+        let public = [
+            probe::public::Reading::Agree {
+                address: "198.51.100.7".parse().unwrap(),
+                asn: Some("64500".into()),
+            },
+            probe::public::Reading::None,
+        ];
         let adapters = vec!["Wi-Fi".to_string(), "Ethernet".to_string()];
         let mut config = config::Config::default();
         let mut panel = Panel::default();
@@ -166,6 +174,7 @@ fn panels(out: &std::path::Path) -> Vec<(String, String)> {
                     processes: &processes,
                     adapters: &adapters,
                     links: &[],
+                    public: Some(&public),
                     now: NOW,
                     elevated: false,
                     config_error: None,

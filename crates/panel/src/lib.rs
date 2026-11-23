@@ -16,6 +16,8 @@ pub struct View<'a> {
     pub adapters: &'a [String],
     /// The Links being measured now.
     pub links: &'a [Link],
+    /// The Public Address, IPv4 then IPv6; `None` before the first lookup.
+    pub public: Option<&'a [probe::public::Reading; 2]>,
     pub now: u64,
     pub elevated: bool,
     pub config_error: Option<&'a str>,
@@ -491,6 +493,10 @@ impl Panel {
                 hop_table(ui, view.history, &trace)
             });
         }
+        if let Some(public) = view.public {
+            ui.add_space(8.0);
+            card(ui, Section::Network, |ui| public_card(ui, public));
+        }
     }
 
     fn window(&self, view: &View) -> Window {
@@ -504,6 +510,51 @@ impl Panel {
     fn points(&self, view: &View, key: &Key) -> Vec<Point> {
         view.history
             .series(key, self.range.history(), view.now, self.graph_aggregate)
+    }
+}
+
+/// The Public Address per IP version, shown as the spec says; it never feeds the Verdict.
+fn public_card(ui: &mut Ui, readings: &[probe::public::Reading; 2]) {
+    ui.label(
+        RichText::new("Public Address")
+            .color(accent(Section::Network))
+            .strong(),
+    );
+    for (v6, r) in [false, true].into_iter().zip(readings) {
+        let (text, flagged) = public_line(v6, r);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(if v6 { "IPv6" } else { "IPv4" }).weak());
+            let t = RichText::new(text);
+            ui.label(if flagged { t.color(theme::warn()) } else { t });
+        });
+    }
+}
+
+/// One IP version's reading as text, and whether it is flagged (spec
+/// `rules/public-address.md`, Reading the answers).
+fn public_line(v6: bool, r: &probe::public::Reading) -> (String, bool) {
+    use probe::public::{Reading, Source};
+    let asn = |a: &Option<String>| a.as_ref().map(|a| format!(" · AS{a}")).unwrap_or_default();
+    match r {
+        Reading::Agree { address, asn: a } => (format!("{address}{}", asn(a)), false),
+        Reading::Differ { dns, https, .. } => (
+            format!("DNS {dns}, HTTPS {https}: different paths out"),
+            true,
+        ),
+        Reading::Nat64(_) => ("IPv6-only network with NAT64".into(), false),
+        Reading::None if v6 => ("No IPv6 internet".into(), false),
+        Reading::None => ("No IPv4 internet".into(), false),
+        Reading::Single {
+            address,
+            source,
+            asn: a,
+        } => {
+            let from = match source {
+                Source::Dns => "DNS",
+                Source::Https => "HTTPS",
+            };
+            (format!("{address}{} ({from} only)", asn(a)), false)
+        }
     }
 }
 
@@ -1070,6 +1121,7 @@ mod tests {
                     processes: &[],
                     adapters: &[],
                     links: &[],
+                    public: None,
                     now,
                     elevated: false,
                     config_error: None,
@@ -1085,6 +1137,49 @@ mod tests {
         let y = top(&ctx).expect("the latency plot drew");
         // The fixture's slowest reply is about 130 ms; 8% margin on top of that is all.
         assert!(y < 1000.0, "latency axis grew to {y}");
+    }
+
+    #[test]
+    fn public_address_lines_follow_the_spec() {
+        use probe::public::{Reading, Source};
+        let a = |s: &str| s.parse().unwrap();
+        let agree = Reading::Agree {
+            address: a("198.51.100.7"),
+            asn: Some("64500".into()),
+        };
+        assert_eq!(
+            public_line(false, &agree),
+            ("198.51.100.7 · AS64500".into(), false)
+        );
+        let differ = Reading::Differ {
+            dns: a("198.51.100.7"),
+            https: a("203.0.113.9"),
+            asn: None,
+        };
+        assert_eq!(
+            public_line(false, &differ),
+            (
+                "DNS 198.51.100.7, HTTPS 203.0.113.9: different paths out".into(),
+                true
+            )
+        );
+        assert_eq!(
+            public_line(true, &Reading::Nat64(a("198.51.100.7"))),
+            ("IPv6-only network with NAT64".into(), false)
+        );
+        assert_eq!(
+            public_line(true, &Reading::None),
+            ("No IPv6 internet".into(), false)
+        );
+        let single = Reading::Single {
+            address: a("2001:db8::1"),
+            source: Source::Dns,
+            asn: None,
+        };
+        assert_eq!(
+            public_line(true, &single),
+            ("2001:db8::1 (DNS only)".into(), false)
+        );
     }
 
     #[test]

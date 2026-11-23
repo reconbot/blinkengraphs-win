@@ -523,6 +523,7 @@ impl App {
             processes: &s.processes,
             adapters: &s.adapters,
             links: &s.links,
+            public: s.public.as_ref(),
             now: model::now(),
             elevated: self.elevated,
             config_error: self.error.as_deref(),
