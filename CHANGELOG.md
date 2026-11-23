@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.1.0](https://github.com/reconbot/blinkengraphs-win/compare/v4.0.0...v4.1.0) (2026-11-23)
+
+
+### Features
+
+* Public Address on the Network tab; graphs show values on hover, gray gaps, dark by default ([#56](https://github.com/reconbot/blinkengraphs-win/issues/56)) ([792b267](https://github.com/reconbot/blinkengraphs-win/commit/792b2673c7be2d3193f84a29dfe83ba4a65cb9d0)), closes [#29](https://github.com/reconbot/blinkengraphs-win/issues/29)
+
 ## [4.0.0](https://github.com/reconbot/blinkengraphs-win/compare/v3.0.1...v4.0.0) (2026-11-23)
 
 
