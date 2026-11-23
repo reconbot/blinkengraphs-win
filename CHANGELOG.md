@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.2.1](https://github.com/reconbot/blinkengraphs-win/compare/v4.2.0...v4.2.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* the Strip and tray icons follow the taskbar's light or dark, with their own Taskbar theme setting ([#61](https://github.com/reconbot/blinkengraphs-win/issues/61)) ([fc7a8e6](https://github.com/reconbot/blinkengraphs-win/commit/fc7a8e67657739f0ef6c46bc6f85132e6d9d4184))
+
 ## [4.2.0](https://github.com/reconbot/blinkengraphs-win/compare/v4.1.0...v4.2.0) (2026-11-23)
 
 
