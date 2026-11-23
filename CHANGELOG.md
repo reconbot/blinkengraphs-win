@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.1](https://github.com/reconbot/blinkengraphs-win/compare/v3.0.0...v3.0.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* graph axes no longer grow every frame; no unlinked duplicate lines; Settings shows the version ([#51](https://github.com/reconbot/blinkengraphs-win/issues/51)) ([abbb486](https://github.com/reconbot/blinkengraphs-win/commit/abbb48602e5bffbf2fc9398ca8eb44a4a9be39b7))
+
 ## [3.0.0](https://github.com/reconbot/blinkengraphs-win/compare/v2.0.0...v3.0.0) (2026-11-22)
 
 
