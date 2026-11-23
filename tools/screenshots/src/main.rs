@@ -42,7 +42,9 @@ fn main() {
 }
 
 fn meters(s: &Scenario, px: u32, taskbar: Taskbar) -> Vec<Image> {
-    let pal = config::Config::default().appearance.palette(taskbar);
+    let pal = config::Config::default()
+        .appearance
+        .taskbar_palette(taskbar);
     Section::ALL
         .iter()
         .map(|&section| {

@@ -40,6 +40,17 @@ pub fn show(ui: &mut Ui, config: &mut Config, view: &View, export: &mut bool) ->
             ui.radio_value(mode, Mode::Dark, "Dark");
         });
         ui.horizontal(|ui| {
+            ui.label("Taskbar theme");
+            let mode = &mut config.appearance.taskbar;
+            ui.radio_value(mode, Mode::System, "System");
+            ui.radio_value(mode, Mode::Light, "Light");
+            ui.radio_value(mode, Mode::Dark, "Dark");
+        })
+        .response
+        .on_hover_text(
+            "The Taskbar Strip and Tray Icons. System matches the taskbar's own light or dark.",
+        );
+        ui.horizontal(|ui| {
             ui.label("Colors");
             let preset = &mut config.appearance.preset;
             egui::ComboBox::from_id_salt("preset")
