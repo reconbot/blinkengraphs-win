@@ -326,6 +326,19 @@ fn defaults_merge() {
 }
 
 #[test]
+fn probe_group_normalize() {
+    // spec rules/probe-group.md, "Normalizing".
+    for c in load("vectors/probe-group/normalize.json")["cases"]
+        .as_array()
+        .unwrap()
+    {
+        let rows: Vec<config::TargetRow> = serde_json::from_value(c["targets"].clone()).unwrap();
+        let got = serde_json::to_value(config::TargetRow::normalized(rows)).unwrap();
+        assert_eq!(got, c["expected"], "probe-group normalize: {}", c["name"]);
+    }
+}
+
+#[test]
 fn public_address() {
     use probe::public::{Reading, Source, read};
     for (name, v) in vectors("public-address") {

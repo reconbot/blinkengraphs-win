@@ -13,6 +13,7 @@ fn limits() -> Limits {
     Limits {
         max_timeout: Duration::from_secs(1),
         dns_query_name: "cloudflare.com".into(),
+        system_dns_domain: "microsoft.com".into(),
         max_ttl: 30,
         full_sweep_every: Duration::from_secs(30),
     }

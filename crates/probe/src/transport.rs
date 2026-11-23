@@ -36,6 +36,8 @@ pub trait Transport: Send + Sync + 'static {
         timeout: Duration,
         name: &str,
     ) -> Option<Duration>;
+    /// One lookup of `name` through the OS resolver; any answer, NXDOMAIN included, is a reply.
+    fn system_dns(&self, via: Option<&Link>, timeout: Duration, name: &str) -> Option<Duration>;
     /// Every `(destination, ttl)` echo at once; `None` where nothing came back. The whole
     /// answer is `None` where ICMP can't be sent at all, so those Probes are skipped.
     fn echo(
@@ -107,6 +109,16 @@ impl Transport for SystemTransport {
         name: &str,
     ) -> Option<Duration> {
         net::dns(via, to, timeout, name)
+    }
+
+    fn system_dns(&self, via: Option<&Link>, timeout: Duration, name: &str) -> Option<Duration> {
+        #[cfg(windows)]
+        return crate::win::system_dns(via, timeout, name);
+        #[cfg(not(windows))]
+        {
+            let _ = (via, timeout, name);
+            None
+        }
     }
 
     fn echo(

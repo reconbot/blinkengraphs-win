@@ -433,24 +433,55 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
         }
     });
     let mut remove = None;
+    let targets: Vec<Target> = g
+        .targets
+        .iter()
+        .map(|r| TargetRow::canonical(&r.target))
+        .collect();
     for (ri, row) in g.targets.iter_mut().enumerate() {
         ui.push_id(ri, |ui| {
             let traceable = !matches!(row.target, Target::Gateway | Target::SystemResolver);
+            // The system resolver has no address: DNS only (spec rules/probe-group.md).
+            let addressable = row.target != Target::SystemResolver;
             crate::table_cells(ui, &WIDTHS, ri % 2 == 1, |i, ui| match i {
                 0 => {
                     let mut text = row.target.to_string();
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY))
-                        .changed()
-                    {
-                        row.target = Target::from(text);
+                    let edit =
+                        ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+                    if edit.changed() {
+                        let next = TargetRow::canonical(&Target::from(text));
+                        // One row per Target: an edit that repeats another row's is refused.
+                        match targets
+                            .iter()
+                            .enumerate()
+                            .find(|&(j, t)| j != ri && *t == next)
+                        {
+                            Some((j, t)) => {
+                                edit.on_hover_text(format!(
+                                    "{t} is already measured, in row {}",
+                                    j + 1
+                                ));
+                            }
+                            None => {
+                                if next == Target::SystemResolver {
+                                    (row.icmp, row.trace, row.tcp, row.udp) =
+                                        (false, false, None, None);
+                                }
+                                row.target = next;
+                            }
+                        }
                     }
                 }
                 1 => {
-                    ui.add(egui::Checkbox::without_text(&mut row.icmp));
+                    ui.add_enabled(addressable, egui::Checkbox::without_text(&mut row.icmp))
+                        .on_disabled_hover_text("The system resolver measures DNS only");
                 }
-                2 => port(ui, &mut row.tcp, TCP_PORT),
-                3 => port(ui, &mut row.udp, UDP_PORT),
+                2 => {
+                    ui.add_enabled_ui(addressable, |ui| port(ui, &mut row.tcp, TCP_PORT));
+                }
+                3 => {
+                    ui.add_enabled_ui(addressable, |ui| port(ui, &mut row.udp, UDP_PORT));
+                }
                 4 => {
                     ui.add(egui::Checkbox::without_text(&mut row.dns));
                 }
@@ -473,8 +504,19 @@ fn probe_group(ui: &mut Ui, g: &mut ProbeGroup, remove_group: &mut Option<usize>
     if let Some(i) = remove {
         g.targets.remove(i);
     }
+    // A new row starts on a Target the group doesn't have yet.
     if ui.small_button("+ Add target").clicked() {
-        let mut row = TargetRow::new(Target::from("example.com".to_string()));
+        let free = (1..)
+            .map(|n| {
+                Target::from(if n == 1 {
+                    "example.com".to_string()
+                } else {
+                    format!("example{n}.com")
+                })
+            })
+            .find(|t| !targets.contains(t))
+            .expect("an unused name");
+        let mut row = TargetRow::new(free);
         row.icmp = true;
         g.targets.push(row);
     }

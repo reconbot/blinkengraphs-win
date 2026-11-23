@@ -45,6 +45,7 @@ pub struct Defaults {
     pub probe_group: ProbeGroupDefaults,
     pub max_timeout_ms: u64,
     pub dns_query_name: String,
+    pub system_dns_domain: String,
     pub hop_trace: HopTraceDefaults,
     pub history: HistoryDefaults,
     pub system_interval_ms: u64,

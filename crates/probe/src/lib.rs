@@ -60,6 +60,9 @@ pub struct Limits {
     pub max_timeout: Duration,
     /// The name DNS Probes ask for.
     pub dns_query_name: String,
+    /// The `system-dns` Probe asks the OS resolver for a random name under it (spec
+    /// `rules/probe-group.md`).
+    pub system_dns_domain: String,
     /// Hop Traces send up to this TTL...
     pub max_ttl: u8,
     /// ...and sweep all of them again this often, beyond the last known path length.
@@ -346,6 +349,16 @@ impl Ticker {
                 };
                 let emit_probe = &emit_probe;
                 s.spawn(move || {
+                    // A name never asked before, so every cache misses and the resolver goes
+                    // upstream (spec `rules/probe-group.md`).
+                    if probe.target == Target::SystemResolver && probe.protocol == Protocol::Dns {
+                        let name = format!(
+                            "{}.{}",
+                            net::random_label(),
+                            shared.limits.system_dns_domain
+                        );
+                        return emit_probe(probe, net.system_dns(via, timeout, &name));
+                    }
                     let rtt = addr.and_then(|ip| {
                         let sa = SocketAddr::new(ip, port);
                         match probe.protocol {

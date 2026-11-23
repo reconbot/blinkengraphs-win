@@ -772,3 +772,54 @@ pub(crate) fn captive_hint() -> bool {
     let ok = unsafe { GetNetworkConnectivityHint(&mut hint) } == 0;
     ok && hint.ConnectivityLevel == NetworkConnectivityLevelHintConstrainedInternetAccess
 }
+
+/// The `system-dns` Probe: one A lookup through the DNS Client, so the configured resolver
+/// answers it as it would any app (spec `rules/probe-group.md`). NXDOMAIN and no-records are
+/// replies. A synchronous query can outlast the timeout; its thread then finishes alone and the
+/// answer is dropped.
+/// https://learn.microsoft.com/windows/win32/api/windns/nf-windns-dnsqueryex
+pub fn system_dns(via: Option<&Link>, timeout: Duration, name: &str) -> Option<Duration> {
+    use windows_sys::Win32::{
+        Foundation::{DNS_ERROR_RCODE_NAME_ERROR, DNS_INFO_NO_RECORDS},
+        NetworkManagement::Dns::{
+            DNS_QUERY_REQUEST, DNS_QUERY_REQUEST_VERSION1, DNS_QUERY_RESULT,
+            DNS_QUERY_RESULTS_VERSION1, DNS_QUERY_STANDARD, DNS_TYPE_A, DnsFree, DnsFreeRecordList,
+            DnsQueryEx,
+        },
+    };
+    // A pinned Link asks only its own resolvers (`InterfaceIndex`).
+    let interface = via.map_or(0, |l| {
+        if l.index_v4 != 0 {
+            l.index_v4
+        } else {
+            l.index_v6
+        }
+    });
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let start = Instant::now();
+    std::thread::spawn(move || {
+        let request = DNS_QUERY_REQUEST {
+            Version: DNS_QUERY_REQUEST_VERSION1,
+            QueryName: name.as_ptr(),
+            QueryType: DNS_TYPE_A,
+            QueryOptions: DNS_QUERY_STANDARD as u64,
+            InterfaceIndex: interface,
+            ..Default::default()
+        };
+        let mut result = DNS_QUERY_RESULT {
+            Version: DNS_QUERY_RESULTS_VERSION1,
+            ..Default::default()
+        };
+        let status = unsafe { DnsQueryEx(&request, &mut result, std::ptr::null_mut()) };
+        let elapsed = start.elapsed();
+        if !result.pQueryRecords.is_null() {
+            unsafe { DnsFree(result.pQueryRecords.cast(), DnsFreeRecordList) };
+        }
+        let answered = status == 0
+            || status as u32 == DNS_ERROR_RCODE_NAME_ERROR
+            || status == DNS_INFO_NO_RECORDS;
+        let _ = tx.send(answered.then_some(elapsed));
+    });
+    rx.recv_timeout(timeout).ok().flatten()
+}

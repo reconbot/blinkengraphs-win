@@ -264,6 +264,37 @@ impl TargetRow {
         }
     }
 
+    /// Trimmed, lowercased, and an IP literal in canonical form: what two rows compare by.
+    pub fn canonical(target: &Target) -> Target {
+        Target::from(target.to_string().trim().to_lowercase())
+    }
+
+    /// spec `rules/probe-group.md`, "Normalizing": one row per Target, in the first row's place,
+    /// and `system-dns` measuring DNS only.
+    pub fn normalized(rows: Vec<TargetRow>) -> Vec<TargetRow> {
+        let mut out: Vec<TargetRow> = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            row.target = Self::canonical(&row.target);
+            if row.target == Target::SystemResolver {
+                row.icmp = false;
+                row.trace = false;
+                row.tcp = None;
+                row.udp = None;
+            }
+            match out.iter_mut().find(|r| r.target == row.target) {
+                Some(first) => {
+                    first.icmp |= row.icmp;
+                    first.dns |= row.dns;
+                    first.trace |= row.trace;
+                    first.tcp = first.tcp.or(row.tcp);
+                    first.udp = first.udp.or(row.udp);
+                }
+                None => out.push(row),
+            }
+        }
+        out
+    }
+
     fn set(&mut self, p: Protocol) {
         match p {
             Protocol::Icmp => self.icmp = true,
@@ -374,6 +405,7 @@ impl Config {
         probe::Limits {
             max_timeout: std::time::Duration::from_millis(d.max_timeout_ms),
             dns_query_name: d.dns_query_name,
+            system_dns_domain: d.system_dns_domain,
             max_ttl: d.hop_trace.max_ttl,
             full_sweep_every: std::time::Duration::from_secs(d.hop_trace.full_sweep_every_s),
         }
@@ -488,6 +520,9 @@ impl Config {
             }
             self.groups = vec![merged];
         }
+        for g in &mut self.groups {
+            g.targets = TargetRow::normalized(std::mem::take(&mut g.targets));
+        }
         self.history.archive_days = self.history.archive_days.clamp(1, HistoryConfig::MAX_DAYS);
         let ram = defaults::get().history.raw_minutes as u64 * 60;
         for v in self.probe_views.values_mut() {
@@ -515,8 +550,13 @@ impl Config {
         toml::from_str::<Config>(text).map(Config::normalize)
     }
 
+    /// Normalized first, so a saved group has one row per Target (spec `rules/probe-group.md`).
     pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).expect("config serializes")
+        let mut c = self.clone();
+        for g in &mut c.groups {
+            g.targets = TargetRow::normalized(std::mem::take(&mut g.targets));
+        }
+        toml::to_string_pretty(&c).expect("config serializes")
     }
 
     /// Missing file → defaults written to disk. Unparseable file → defaults plus the error, file left alone.

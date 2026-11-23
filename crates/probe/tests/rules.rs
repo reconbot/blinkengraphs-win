@@ -23,6 +23,8 @@ struct Net {
     /// Destinations a Link doesn't route.
     unrouted: Vec<IpAddr>,
     sent: Sent,
+    /// Each name the OS resolver was asked for.
+    resolved: Arc<Mutex<Vec<String>>>,
 }
 
 impl Net {
@@ -62,6 +64,10 @@ impl Transport for Net {
     fn dns(&self, via: Option<&Link>, to: SocketAddr, _: Duration, _: &str) -> Option<Duration> {
         self.send(via, to.ip());
         Some(Duration::from_millis(9))
+    }
+    fn system_dns(&self, _: Option<&Link>, _: Duration, name: &str) -> Option<Duration> {
+        self.resolved.lock().unwrap().push(name.into());
+        Some(Duration::from_millis(11))
     }
     fn echo(
         &self,
@@ -105,6 +111,7 @@ fn limits() -> Limits {
     Limits {
         max_timeout: Duration::from_secs(1),
         dns_query_name: "example.com".into(),
+        system_dns_domain: "example.net".into(),
         max_ttl: 30,
         full_sweep_every: Duration::from_secs(30),
     }
@@ -308,4 +315,29 @@ fn a_target_its_link_does_not_route_is_absent_not_lost() {
     let r = round(&rx);
     let to: Vec<&Target> = r.probes.iter().map(|r| &r.probe.target).collect();
     assert_eq!(to, [&Target::Addr(V6)]);
+}
+
+#[test]
+fn system_dns_asks_the_os_resolver_for_a_fresh_random_name() {
+    // spec rules/probe-group.md, "The system-dns Probe".
+    let net = Net::up();
+    let resolved = net.resolved.clone();
+    let sent = net.sent.clone();
+    let (_p, rx) = start(net, vec![p(Protocol::Dns, Target::SystemResolver)], vec![]);
+    let (probes, _) = first_tick(&rx);
+    assert_eq!(probes.len(), 1);
+    assert_eq!(probes[0].rtt_ms, Some(11.0));
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "no query straight to a resolver address"
+    );
+    let names = resolved.lock().unwrap();
+    let (label, domain) = names[0].split_once('.').unwrap();
+    assert_eq!(domain, "example.net");
+    assert_eq!(label.len(), 12);
+    assert!(
+        label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    );
 }

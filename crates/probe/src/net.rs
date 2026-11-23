@@ -100,6 +100,22 @@ pub fn dns(
     }
 }
 
+/// 12 characters from `a`–`z` and `0`–`9`, fresh each call: a `system-dns` label.
+pub fn random_label() -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut bits = RandomState::new().hash_one(Instant::now());
+    (0..12)
+        .map(|i| {
+            if i == 6 {
+                bits = RandomState::new().hash_one((Instant::now(), bits));
+            }
+            let c = CHARS[(bits % CHARS.len() as u64) as usize] as char;
+            bits /= CHARS.len() as u64;
+            c
+        })
+        .collect()
+}
+
 fn random_u16() -> u16 {
     RandomState::new().hash_one(Instant::now()) as u16
 }
