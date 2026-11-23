@@ -2,7 +2,7 @@ use collect::{AdapterChoice, Collector};
 use model::{ProcessRow, Sample};
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -41,6 +41,10 @@ pub trait Sensors: Send {
     fn slept_s(&mut self) -> f64;
     /// The Links up now, each to be measured on its own (spec `CONTEXT.md`, Link).
     fn links(&mut self) -> Vec<model::Link>;
+    /// The latest Public Address reading, IPv4 then IPv6; `None` before the first lookup.
+    fn public_address(&mut self) -> Option<[probe::public::Reading; 2]>;
+    /// Looks the Public Address up again soon, as after a Link change.
+    fn refresh_public(&mut self);
 }
 
 /// The OS adapter: performance counters through `collect`, network state through `probe`.
@@ -48,6 +52,8 @@ pub struct SystemSensors {
     adapter: AdapterChoice,
     collector: Option<Collector>,
     captive: Arc<AtomicBool>,
+    public: Arc<Mutex<Option<[probe::public::Reading; 2]>>>,
+    refresh: Arc<AtomicBool>,
 }
 
 impl SystemSensors {
@@ -59,10 +65,43 @@ impl SystemSensors {
             .name("captive portal".into())
             .spawn(move || watch_captive(&captive_portal_url, &flag))
             .expect("spawn captive portal check");
+        let public = Arc::new(Mutex::new(None));
+        let refresh = Arc::new(AtomicBool::new(false));
+        let (p, r) = (public.clone(), refresh.clone());
+        thread::Builder::new()
+            .name("public address".into())
+            .spawn(move || watch_public(&p, &r))
+            .expect("spawn public address lookups");
         Self {
             collector: Collector::new(adapter.clone()).ok(),
             adapter,
             captive,
+            public,
+            refresh,
+        }
+    }
+}
+
+/// Looks the Public Address up on start, every `refresh_s`, and soon after `refresh` is set
+/// (spec `rules/public-address.md`, Refresh).
+fn watch_public(out: &Mutex<Option<[probe::public::Reading; 2]>>, refresh: &AtomicBool) {
+    let d = config::defaults::get().public_address;
+    let t = Duration::from_secs(5);
+    loop {
+        if probe::path_up() {
+            let look =
+                |v6: bool, url: &str| probe::public::lookup(&d.dns_server, &d.dns_name, url, v6, t);
+            let r = [
+                look(false, &d.https_url_ipv4),
+                look(true, &d.https_url_ipv6),
+            ];
+            *out.lock().unwrap() = Some(r);
+        }
+        for _ in 0..d.refresh_s {
+            if refresh.swap(false, Ordering::Relaxed) {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
         }
     }
 }
@@ -116,6 +155,14 @@ impl Sensors for SystemSensors {
 
     fn links(&mut self) -> Vec<model::Link> {
         probe::links()
+    }
+
+    fn public_address(&mut self) -> Option<[probe::public::Reading; 2]> {
+        self.public.lock().unwrap().clone()
+    }
+
+    fn refresh_public(&mut self) {
+        self.refresh.store(true, Ordering::Relaxed);
     }
 
     fn network(&mut self) -> Network {

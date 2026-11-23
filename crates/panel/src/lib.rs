@@ -16,6 +16,8 @@ pub struct View<'a> {
     pub adapters: &'a [String],
     /// The Links being measured now.
     pub links: &'a [Link],
+    /// The Public Address, IPv4 then IPv6; `None` before the first lookup.
+    pub public: Option<&'a [probe::public::Reading; 2]>,
     pub now: u64,
     pub elevated: bool,
     pub config_error: Option<&'a str>,
@@ -283,6 +285,7 @@ impl Panel {
             .collect();
         let fmt = move |v: f64| match primary.unit() {
             Unit::BytesPerSec => bytes(v),
+            Unit::Percent => format!("{v:.0}%"),
             _ => format!("{v:.0}"),
         };
         sparkplot(
@@ -491,6 +494,10 @@ impl Panel {
                 hop_table(ui, view.history, &trace)
             });
         }
+        if let Some(public) = view.public {
+            ui.add_space(8.0);
+            card(ui, Section::Network, |ui| public_card(ui, public));
+        }
     }
 
     fn window(&self, view: &View) -> Window {
@@ -507,6 +514,51 @@ impl Panel {
     }
 }
 
+/// The Public Address per IP version, shown as the spec says; it never feeds the Verdict.
+fn public_card(ui: &mut Ui, readings: &[probe::public::Reading; 2]) {
+    ui.label(
+        RichText::new("Public Address")
+            .color(accent(Section::Network))
+            .strong(),
+    );
+    for (v6, r) in [false, true].into_iter().zip(readings) {
+        let (text, flagged) = public_line(v6, r);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(if v6 { "IPv6" } else { "IPv4" }).weak());
+            let t = RichText::new(text);
+            ui.label(if flagged { t.color(theme::warn()) } else { t });
+        });
+    }
+}
+
+/// One IP version's reading as text, and whether it is flagged (spec
+/// `rules/public-address.md`, Reading the answers).
+fn public_line(v6: bool, r: &probe::public::Reading) -> (String, bool) {
+    use probe::public::{Reading, Source};
+    let asn = |a: &Option<String>| a.as_ref().map(|a| format!(" · AS{a}")).unwrap_or_default();
+    match r {
+        Reading::Agree { address, asn: a } => (format!("{address}{}", asn(a)), false),
+        Reading::Differ { dns, https, .. } => (
+            format!("DNS {dns}, HTTPS {https}: different paths out"),
+            true,
+        ),
+        Reading::Nat64(_) => ("IPv6-only network with NAT64".into(), false),
+        Reading::None if v6 => ("No IPv6 internet".into(), false),
+        Reading::None => ("No IPv4 internet".into(), false),
+        Reading::Single {
+            address,
+            source,
+            asn: a,
+        } => {
+            let from = match source {
+                Source::Dns => "DNS",
+                Source::Https => "HTTPS",
+            };
+            (format!("{address}{} ({from} only)", asn(a)), false)
+        }
+    }
+}
+
 /// "icmp 1.1.1.1 · Wi-Fi": the Probe, and its Link's adapter when known.
 fn line_name(p: &Probe, link: Option<&LinkId>, links: &[Link]) -> String {
     match link {
@@ -516,11 +568,16 @@ fn line_name(p: &Probe, link: Option<&LinkId>, links: &[Link]) -> String {
 }
 
 /// The adapter's name, or the Link's id once it is gone.
+/// The adapter's name. A Link no longer up, such as the same adapter under the identity it had
+/// before, is named after its adapter and marked earlier, rather than shown as a raw id.
 fn link_alias(id: &LinkId, links: &[Link]) -> String {
-    links
-        .iter()
-        .find(|l| l.id == *id)
-        .map_or_else(|| id.to_string(), |l| l.alias.clone())
+    if let Some(l) = links.iter().find(|l| l.id == *id) {
+        return l.alias.clone();
+    }
+    match links.iter().find(|l| l.id.luid == id.luid) {
+        Some(l) => format!("{} (earlier)", l.alias),
+        None => "earlier network".to_string(),
+    }
 }
 
 fn latency_probes(h: &History, all: bool) -> Vec<Probe> {
@@ -912,8 +969,8 @@ fn states<'a>(pu: &mut egui_plot::PlotUi, w: Window, series: impl Iterator<Item 
     }
     for (from, to) in paused {
         pu.span(
-            egui_plot::Span::new("not measuring", from..=to)
-                .fill(Color32::from_rgba_unmultiplied(t.r(), t.g(), t.b(), 18))
+            egui_plot::Span::new("", from..=to)
+                .fill(gray(t))
                 .border_width(0.0),
         );
     }
@@ -933,16 +990,17 @@ fn sparkplot(
     series: Vec<(&str, Color32, Vec<Point>)>,
     max: Option<f64>,
     height: f32,
-    fmt: impl Fn(f64) -> String + 'static,
+    fmt: impl Fn(f64) -> String + Clone + 'static,
     w: Window,
 ) {
+    let axis = fmt.clone();
     let mut plot = base_plot(id, height, w)
         .include_y(0.0)
-        .y_axis_formatter(move |m, _| fmt(m.value));
+        .y_axis_formatter(move |m, _| axis(m.value));
     if let Some(m) = max {
         plot = plot.include_y(m);
     }
-    plot.show(ui, |pu| {
+    let shown = plot.show(ui, |pu| {
         unrecorded(pu, w, series.iter().map(|s| s.2.as_slice()));
         states(pu, w, series.iter().map(|s| s.2.as_slice()));
         aggregate_tag(pu, w, data_top(series.iter().map(|s| s.2.as_slice()), max));
@@ -951,7 +1009,82 @@ fn sparkplot(
                 pu.line(l);
             }
         }
+        pu.pointer_coordinate().map(|p| p.x)
     });
+    let lines: Vec<_> = series
+        .iter()
+        .map(|(n, c, p)| (n.to_string(), *c, p.as_slice()))
+        .collect();
+    hover_values(shown.response, shown.inner, &lines, w, &fmt);
+}
+
+/// The value of every line where the pointer is, in a tooltip: what was drawn there, not the
+/// pointer's coordinates.
+fn hover_values(
+    response: egui::Response,
+    x: Option<f64>,
+    lines: &[(String, Color32, &[Point])],
+    w: Window,
+    fmt: &dyn Fn(f64) -> String,
+) {
+    let Some(x) = x.filter(|_| response.hovered()) else {
+        return;
+    };
+    let rows = values_at(lines, x, w.now);
+    response.on_hover_ui_at_pointer(|ui| {
+        ui.label(RichText::new(ago(-x)).small().weak());
+        for (name, color, v) in rows {
+            let text = match v {
+                Some(Shown::Value(v)) => fmt(v),
+                Some(Shown::Lost) => "lost".to_string(),
+                Some(Shown::Paused) => "not measuring".to_string(),
+                None => "—".to_string(),
+            };
+            ui.label(RichText::new(format!("{name}  {text}")).color(color));
+        }
+    });
+}
+
+/// What one line shows in the bucket under `x` (seconds before now).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Shown {
+    Value(f64),
+    Lost,
+    Paused,
+}
+
+/// Each line's bucket covering `x`, seconds relative to `now`; `None` where the line has none.
+fn values_at(
+    lines: &[(String, Color32, &[Point])],
+    x: f64,
+    now: f64,
+) -> Vec<(String, Color32, Option<Shown>)> {
+    lines
+        .iter()
+        .map(|(name, color, pts)| {
+            let p = pts.iter().find(|p| {
+                let from = p.at as f64 - now;
+                from <= x && x < from + p.w as f64
+            });
+            let shown = p.map(|p| match (p.state, p.value) {
+                (State::Paused, _) => Shown::Paused,
+                (_, Some(v)) => Shown::Value(v),
+                _ => Shown::Lost,
+            });
+            (name.clone(), *color, shown)
+        })
+        .collect()
+}
+
+/// "45 s ago", "12 min ago", "3 h ago", "2 d ago".
+fn ago(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    match s {
+        s if s < 120 => format!("{s} s ago"),
+        s if s < 7200 => format!("{} min ago", s / 60),
+        s if s < 172_800 => format!("{} h ago", s / 3600),
+        s => format!("{} d ago", s / 86_400),
+    }
 }
 
 fn multiplot(
@@ -962,7 +1095,7 @@ fn multiplot(
     height: f32,
     w: Window,
 ) {
-    base_plot(id, height, w)
+    let shown = base_plot(id, height, w)
         .include_y(0.0)
         .y_axis_formatter(|m, _| format!("{:.0} ms", m.value))
         .show(ui, |pu| {
@@ -993,7 +1126,15 @@ fn multiplot(
                     );
                 }
             }
+            pu.pointer_coordinate().map(|p| p.x)
         });
+    let lines: Vec<_> = series
+        .iter()
+        .map(|(n, c, p)| (n.clone(), *c, p.as_slice()))
+        .collect();
+    hover_values(shown.response, shown.inner, &lines, w, &|v| {
+        model::rtt_text(v)
+    });
 }
 
 /// Shades the part of the window before the first recorded point, so a 24h view of 20 minutes of data reads as such.
@@ -1007,19 +1148,17 @@ fn unrecorded<'a>(
         .reduce(f64::min)
         .unwrap_or(0.0);
     if first > -w.secs + w.secs * 0.01 {
-        // The label is drawn inside the span, so a narrow span gets none rather than a clipped one.
-        let label = if first + w.secs > w.secs * 0.3 {
-            "no data"
-        } else {
-            ""
-        };
-        let t = theme::text();
         pu.span(
-            egui_plot::Span::new(label, -w.secs..=first)
-                .fill(Color32::from_rgba_unmultiplied(t.r(), t.g(), t.b(), 10))
+            egui_plot::Span::new("", -w.secs..=first)
+                .fill(gray(theme::text()))
                 .border_width(0.0),
         );
     }
+}
+
+/// Time with nothing to draw, not measured or before History began: plain gray, unlabelled.
+fn gray(t: Color32) -> Color32 {
+    Color32::from_rgba_unmultiplied(t.r(), t.g(), t.b(), 14)
 }
 
 /// One id per plot name, so its memory (bounds) can be found again.
@@ -1042,6 +1181,10 @@ fn base_plot(id: &str, height: f32, w: Window) -> Plot<'static> {
         .show_background(false)
         .y_axis_min_width(44.0)
         .set_margin_fraction(vec2(0.0, 0.08))
+        // The hover tooltip gives each line's value instead (`hover_values`).
+        .show_crosshair(false)
+        .show_x(false)
+        .show_y(false)
 }
 
 pub fn severity_dot(s: Severity) -> Color32 {
@@ -1070,6 +1213,7 @@ mod tests {
                     processes: &[],
                     adapters: &[],
                     links: &[],
+                    public: None,
                     now,
                     elevated: false,
                     config_error: None,
@@ -1085,6 +1229,110 @@ mod tests {
         let y = top(&ctx).expect("the latency plot drew");
         // The fixture's slowest reply is about 130 ms; 8% margin on top of that is all.
         assert!(y < 1000.0, "latency axis grew to {y}");
+    }
+
+    #[test]
+    fn hovering_reads_each_line_where_the_pointer_is() {
+        let p = |at, state, value| Point {
+            at,
+            w: 15,
+            state,
+            value,
+            loss: Some(0.0),
+            provisional: false,
+        };
+        let a = [
+            p(970, State::Value, Some(12.0)),
+            p(985, State::Paused, None),
+        ];
+        let b = [p(970, State::Lost, None)];
+        let lines = [
+            ("a".to_string(), Color32::RED, &a[..]),
+            ("b".to_string(), Color32::BLUE, &b[..]),
+        ];
+        let at = |x| {
+            values_at(&lines, x, 1000.0)
+                .into_iter()
+                .map(|r| r.2)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at(-25.0), [Some(Shown::Value(12.0)), Some(Shown::Lost)]);
+        assert_eq!(at(-10.0), [Some(Shown::Paused), None]);
+        assert_eq!(ago(25.4), "25 s ago");
+        assert_eq!(ago(3600.0), "60 min ago");
+    }
+
+    #[test]
+    fn a_link_no_longer_up_is_named_after_its_adapter() {
+        let up = Link {
+            id: LinkId {
+                luid: 7,
+                gateway: Some("192.168.1.1".parse().unwrap()),
+                gateway_mac: Some([1, 2, 3, 4, 5, 6]),
+            },
+            alias: "Wi-Fi".into(),
+            kind: model::LinkKind::WiFi,
+            index_v4: 1,
+            index_v6: 1,
+            source_v4: None,
+            source_v6: None,
+            default_route: true,
+        };
+        let before = LinkId {
+            gateway_mac: None,
+            ..up.id.clone()
+        };
+        let gone = LinkId {
+            luid: 9,
+            ..before.clone()
+        };
+        let links = [up.clone()];
+        assert_eq!(link_alias(&up.id, &links), "Wi-Fi");
+        assert_eq!(link_alias(&before, &links), "Wi-Fi (earlier)");
+        assert_eq!(link_alias(&gone, &links), "earlier network");
+    }
+
+    #[test]
+    fn public_address_lines_follow_the_spec() {
+        use probe::public::{Reading, Source};
+        let a = |s: &str| s.parse().unwrap();
+        let agree = Reading::Agree {
+            address: a("198.51.100.7"),
+            asn: Some("64500".into()),
+        };
+        assert_eq!(
+            public_line(false, &agree),
+            ("198.51.100.7 · AS64500".into(), false)
+        );
+        let differ = Reading::Differ {
+            dns: a("198.51.100.7"),
+            https: a("203.0.113.9"),
+            asn: None,
+        };
+        assert_eq!(
+            public_line(false, &differ),
+            (
+                "DNS 198.51.100.7, HTTPS 203.0.113.9: different paths out".into(),
+                true
+            )
+        );
+        assert_eq!(
+            public_line(true, &Reading::Nat64(a("198.51.100.7"))),
+            ("IPv6-only network with NAT64".into(), false)
+        );
+        assert_eq!(
+            public_line(true, &Reading::None),
+            ("No IPv6 internet".into(), false)
+        );
+        let single = Reading::Single {
+            address: a("2001:db8::1"),
+            source: Source::Dns,
+            asn: None,
+        };
+        assert_eq!(
+            public_line(true, &single),
+            ("2001:db8::1 (DNS only)".into(), false)
+        );
     }
 
     #[test]

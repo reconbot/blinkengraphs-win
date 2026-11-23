@@ -9,6 +9,8 @@ struct Fake {
     process_reads: Arc<AtomicUsize>,
     slept: Arc<Mutex<f64>>,
     links: Arc<Mutex<Vec<model::Link>>>,
+    public: Option<[probe::public::Reading; 2]>,
+    public_refreshes: Arc<AtomicUsize>,
 }
 
 impl Sensors for Fake {
@@ -34,6 +36,12 @@ impl Sensors for Fake {
     fn links(&mut self) -> Vec<model::Link> {
         self.links.lock().unwrap().clone()
     }
+    fn public_address(&mut self) -> Option<[probe::public::Reading; 2]> {
+        self.public.clone()
+    }
+    fn refresh_public(&mut self) {
+        self.public_refreshes.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 const AT: u64 = 1_800_000_000;
@@ -53,6 +61,7 @@ fn monitor_with(fake: Fake, idle: IdleCheck) -> Monitor<Fake> {
         processes: vec![],
         adapters: vec![],
         links: vec![],
+        public: None,
         paused: false,
         sample_count: 0,
     }));
@@ -405,4 +414,26 @@ fn under_a_vpn_the_gateway_probes_are_the_carrying_link_s() {
         "the Wi-Fi Gateway's, not the tunnel's"
     );
     assert!(probes.iter().any(|(p, _)| *p == one));
+}
+
+#[test]
+fn the_public_address_reaches_the_panel_and_refreshes_when_the_links_change() {
+    use probe::public::Reading;
+    let fake = Fake {
+        public: Some([Reading::None, Reading::None]),
+        ..Fake::default()
+    };
+    let refreshes = fake.public_refreshes.clone();
+    let links = fake.links.clone();
+    let mut m = monitor(fake, false);
+    let t0 = Instant::now();
+    m.tick(t0, WALL);
+    assert_eq!(
+        m.shared.lock().unwrap().public,
+        Some([Reading::None, Reading::None])
+    );
+    assert_eq!(refreshes.load(Ordering::Relaxed), 0);
+    links.lock().unwrap().push(link(2, "Wi-Fi", true));
+    m.tick(t0 + Duration::from_secs(10), WALL + 10.0);
+    assert_eq!(refreshes.load(Ordering::Relaxed), 1);
 }

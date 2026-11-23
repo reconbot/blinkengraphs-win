@@ -772,3 +772,81 @@ pub(crate) fn captive_hint() -> bool {
     let ok = unsafe { GetNetworkConnectivityHint(&mut hint) } == 0;
     ok && hint.ConnectivityLevel == NetworkConnectivityLevelHintConstrainedInternetAccess
 }
+
+/// The body of a `GET` of an `https://` URL, through WinHTTP: Windows' own TLS, certificate
+/// store and proxy settings, and no TLS library in the exe (ADR 0007). `None` unless the
+/// server answers 200.
+/// https://learn.microsoft.com/windows/win32/winhttp/winhttp-sessions-overview
+pub fn https_get(url: &str, timeout: Duration) -> Option<String> {
+    use windows_sys::Win32::Networking::WinHttp::*;
+    struct Handle(*mut core::ffi::c_void);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe { WinHttpCloseHandle(self.0) };
+        }
+    }
+    let open = |h: *mut core::ffi::c_void| (!h.is_null()).then(|| Handle(h));
+    let w = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let rest = url.strip_prefix("https://")?;
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let path = if path.is_empty() { "/" } else { path };
+    let (agent, host, verb, path) = (w("blinkengraphs"), w(host), w("GET"), w(path));
+    let session = open(unsafe {
+        WinHttpOpen(
+            agent.as_ptr(),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            null(),
+            null(),
+            0,
+        )
+    })?;
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    unsafe { WinHttpSetTimeouts(session.0, ms, ms, ms, ms) };
+    let connect =
+        open(unsafe { WinHttpConnect(session.0, host.as_ptr(), INTERNET_DEFAULT_HTTPS_PORT, 0) })?;
+    let request = open(unsafe {
+        WinHttpOpenRequest(
+            connect.0,
+            verb.as_ptr(),
+            path.as_ptr(),
+            null(),
+            null(),
+            null(),
+            WINHTTP_FLAG_SECURE,
+        )
+    })?;
+    let sent = unsafe { WinHttpSendRequest(request.0, null(), 0, null(), 0, 0, 0) } != 0
+        && unsafe { WinHttpReceiveResponse(request.0, null_mut()) } != 0;
+    if !sent {
+        return None;
+    }
+    let mut status: u32 = 0;
+    let mut len = size_of::<u32>() as u32;
+    let ok = unsafe {
+        WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            null(),
+            (&mut status as *mut u32).cast(),
+            &mut len,
+            null_mut(),
+        )
+    } != 0;
+    if !ok || status != 200 {
+        return None;
+    }
+    // The body is one address and a newline; anything long is not an answer.
+    let mut body = Vec::new();
+    let mut buf = [0u8; 512];
+    while body.len() < 4096 {
+        let mut n = 0u32;
+        let read = unsafe {
+            WinHttpReadData(request.0, buf.as_mut_ptr().cast(), buf.len() as u32, &mut n)
+        } != 0;
+        if !read || n == 0 {
+            break;
+        }
+        body.extend_from_slice(&buf[..n as usize]);
+    }
+    String::from_utf8(body).ok()
+}

@@ -15,6 +15,7 @@ history.workspace = true
 config.workspace = true
 verdict.workspace = true
 panel.workspace = true
+probe.workspace = true
 meters.workspace = true
 egui = { version = "0.37", features = ["default_fonts"] }
 egui_kittest = { version = "0.37", features = ["wgpu"] }
