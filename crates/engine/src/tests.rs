@@ -268,6 +268,7 @@ fn link(luid: u64, alias: &str, default_route: bool) -> model::Link {
         id: model::LinkId {
             luid,
             gateway: Some("192.168.1.1".parse().unwrap()),
+            gateway_mac: None,
         },
         alias: alias.into(),
         kind: model::LinkKind::Ethernet,

@@ -527,7 +527,11 @@ pub fn links() -> Vec<Link> {
             _ => LinkKind::Other,
         };
         out.push(Link {
-            id: LinkId { luid, gateway },
+            id: LinkId {
+                luid,
+                gateway,
+                gateway_mac: gateway.and_then(|g| gateway_mac(luid, g)),
+            },
             alias: wide(a.FriendlyName),
             kind,
             index_v4: unsafe { a.Anonymous1.Anonymous.IfIndex },
@@ -544,6 +548,49 @@ pub fn links() -> Vec<Link> {
         });
     }
     out
+}
+
+/// The Gateway's MAC address, from the neighbor table, or by resolving it when the table has
+/// no entry. Neither needs admin. Once read it is kept for the process, so an entry that ages
+/// out of the table doesn't rename the Link (spec `rules/history.md`, Links).
+/// https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-getipnetentry2
+fn gateway_mac(luid: u64, gateway: IpAddr) -> Option<[u8; 6]> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    /// MAC by (NET_LUID, Gateway).
+    type Seen = Mutex<HashMap<(u64, IpAddr), [u8; 6]>>;
+    static SEEN: OnceLock<Seen> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(mac) = seen.lock().unwrap().get(&(luid, gateway)) {
+        return Some(*mac);
+    }
+    let mut row: windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPNET_ROW2 =
+        unsafe { zeroed() };
+    match gateway {
+        IpAddr::V4(a) => {
+            row.Address.Ipv4 = SOCKADDR_IN {
+                sin_family: AF_INET,
+                sin_addr: IN_ADDR {
+                    S_un: IN_ADDR_0 {
+                        S_addr: u32::from_ne_bytes(a.octets()),
+                    },
+                },
+                ..Default::default()
+            }
+        }
+        IpAddr::V6(a) => row.Address.Ipv6 = sockaddr_in6(a),
+    }
+    row.InterfaceLuid = NET_LUID_LH { Value: luid };
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIpNetEntry2, ResolveIpNetEntry2};
+    let found = unsafe { GetIpNetEntry2(&mut row) } == NO_ERROR
+        || unsafe { ResolveIpNetEntry2(&mut row, null()) } == NO_ERROR;
+    let mac: [u8; 6] = row.PhysicalAddress[..6].try_into().ok()?;
+    // A zero address is an entry still being resolved, not a MAC.
+    if !found || row.PhysicalAddressLength != 6 || mac == [0; 6] {
+        return None;
+    }
+    seen.lock().unwrap().insert((luid, gateway), mac);
+    Some(mac)
 }
 
 /// The adapter list, retried while it grows between the sizing call and the real one.

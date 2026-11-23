@@ -3,7 +3,7 @@
 Spec 5.0.0 measures each active Link (Ethernet, Wi-Fi, a VPN) on its own, keeps its History, stats and baselines apart, and has the Verdict judge the Followed Adapter's Link (spec `rules/verdict.md`, `CONTEXT.md` Link). Windows does it this way:
 
 - **A Link is an adapter that is up and reaches beyond itself.** It has a Gateway, or it carries a default route on-link, as a VPN may. `GetAdaptersAddresses(GAA_FLAG_INCLUDE_GATEWAYS)` lists them. The engine reads them every 10 s with the adapters, and re-plans the Prober only when they change.
-- **A `LinkId` is the adapter's NET_LUID and its Gateway:** the IPv4 one, else the IPv6 one, else none. A NET_LUID survives a restart, unlike an interface index. History keys name the Link this way (`probe:icmp 1.1.1.1 on 0006000000000000@192.168.1.1`).
+- **A `LinkId` is the adapter's NET_LUID, its Gateway and the Gateway's MAC address.** The Gateway is the IPv4 one, else the IPv6 one, else none. A NET_LUID survives a restart, unlike an interface index. The MAC comes from the neighbor table (`GetIpNetEntry2`, else `ResolveIpNetEntry2`; no admin) and is kept for the process once read, so two homes on `192.168.1.1` keep separate History (spec 6.1.0). History keys name the Link this way (`probe:icmp 1.1.1.1 on 0006000000000000@192.168.1.1/00-1a-2b-3c-4d-5e`).
 - **Every Probe Group runs once per Link** (`engine::groups_on`). Each Round carries its Link.
   - TCP, UDP and DNS sockets set `IP_UNICAST_IF` (index in network byte order) or `IPV6_UNICAST_IF` (host order).
   - ICMP uses `IcmpSendEcho2Ex` and `Icmp6SendEcho2` with the Link's source address.

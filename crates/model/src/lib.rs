@@ -363,33 +363,56 @@ impl std::fmt::Display for Probe {
 }
 
 /// Names a Link: its interface (the adapter's NET_LUID, which survives a restart) and its
-/// Gateway, the IPv4 one, else the IPv6 one, else none (spec `rules/history.md`, Links).
+/// Gateway, the IPv4 one, else the IPv6 one, else none, with the Gateway's MAC address when it
+/// can be read (spec `rules/history.md`, Links). The MAC keeps apart two networks behind the
+/// same Gateway address.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LinkId {
     pub luid: u64,
     pub gateway: Option<std::net::IpAddr>,
+    #[serde(default)]
+    pub gateway_mac: Option<[u8; 6]>,
 }
 
+/// `{luid}@{gateway}/{mac}`, each part only when known.
 impl std::fmt::Display for LinkId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:016x}", self.luid)?;
-        match self.gateway {
-            Some(g) => write!(f, "@{g}"),
-            None => Ok(()),
+        if let Some(g) = self.gateway {
+            write!(f, "@{g}")?;
         }
+        if let Some(m) = self.gateway_mac {
+            let hex: Vec<String> = m.iter().map(|b| format!("{b:02x}")).collect();
+            write!(f, "/{}", hex.join("-"))?;
+        }
+        Ok(())
     }
 }
 
 impl std::str::FromStr for LinkId {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
-        let (luid, gateway) = match s.split_once('@') {
-            Some((l, g)) => (l, Some(g.parse().map_err(|e| format!("{e}"))?)),
+        let err = |e: &dyn std::fmt::Display| e.to_string();
+        let (rest, gateway_mac) = match s.split_once('/') {
+            Some((r, m)) => {
+                let bytes: Vec<u8> = m
+                    .split('-')
+                    .map(|b| u8::from_str_radix(b, 16))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| err(&e))?;
+                let mac: [u8; 6] = bytes.try_into().map_err(|_| format!("bad MAC {m:?}"))?;
+                (r, Some(mac))
+            }
             None => (s, None),
         };
+        let (luid, gateway) = match rest.split_once('@') {
+            Some((l, g)) => (l, Some(g.parse().map_err(|e| err(&e))?)),
+            None => (rest, None),
+        };
         Ok(LinkId {
-            luid: u64::from_str_radix(luid, 16).map_err(|e| format!("{e}"))?,
+            luid: u64::from_str_radix(luid, 16).map_err(|e| err(&e))?,
             gateway,
+            gateway_mac,
         })
     }
 }
