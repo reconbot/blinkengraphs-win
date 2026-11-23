@@ -32,16 +32,22 @@ impl Section {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Metric {
-    CpuTotal,
+    /// The non-idle share of all logical CPUs (spec `CONTEXT.md`, Metric).
+    #[serde(alias = "CpuTotal")]
+    CpuBusy,
     CpuKernel,
     CpuQueue,
     MemCommit,
     MemPhysical,
-    MemHardFaults,
+    /// Bytes read from disk into memory per second.
+    #[serde(alias = "MemHardFaults")]
+    MemPageIns,
     NetDown,
     NetUp,
     NetErrors,
-    DiskActive,
+    /// The share of time the disks had a request in flight.
+    #[serde(alias = "DiskActive")]
+    DiskBusy,
     DiskRead,
     DiskWrite,
     DiskResponse,
@@ -58,16 +64,16 @@ pub enum Unit {
 
 impl Metric {
     pub const ALL: [Metric; 14] = [
-        Metric::CpuTotal,
+        Metric::CpuBusy,
         Metric::CpuKernel,
         Metric::CpuQueue,
         Metric::MemCommit,
         Metric::MemPhysical,
-        Metric::MemHardFaults,
+        Metric::MemPageIns,
         Metric::NetDown,
         Metric::NetUp,
         Metric::NetErrors,
-        Metric::DiskActive,
+        Metric::DiskBusy,
         Metric::DiskRead,
         Metric::DiskWrite,
         Metric::DiskResponse,
@@ -77,26 +83,26 @@ impl Metric {
     pub fn section(self) -> Section {
         use Metric::*;
         match self {
-            CpuTotal | CpuKernel | CpuQueue => Section::Cpu,
-            MemCommit | MemPhysical | MemHardFaults => Section::Memory,
+            CpuBusy | CpuKernel | CpuQueue => Section::Cpu,
+            MemCommit | MemPhysical | MemPageIns => Section::Memory,
             NetDown | NetUp | NetErrors => Section::Network,
-            DiskActive | DiskRead | DiskWrite | DiskResponse | DiskQueue => Section::Disk,
+            DiskBusy | DiskRead | DiskWrite | DiskResponse | DiskQueue => Section::Disk,
         }
     }
 
     pub fn label(self) -> &'static str {
         use Metric::*;
         match self {
-            CpuTotal => "Total",
+            CpuBusy => "Busy",
             CpuKernel => "Kernel",
             CpuQueue => "Run queue",
             MemCommit => "Commit charge",
             MemPhysical => "Physical in use",
-            MemHardFaults => "Hard faults",
+            MemPageIns => "Paging in",
             NetDown => "Download",
             NetUp => "Upload",
             NetErrors => "Errors + discards",
-            DiskActive => "Active time",
+            DiskBusy => "Busy",
             DiskRead => "Read",
             DiskWrite => "Write",
             DiskResponse => "Response time",
@@ -107,9 +113,9 @@ impl Metric {
     pub fn unit(self) -> Unit {
         use Metric::*;
         match self {
-            CpuTotal | CpuKernel | MemCommit | MemPhysical | DiskActive => Unit::Percent,
-            NetDown | NetUp | DiskRead | DiskWrite => Unit::BytesPerSec,
-            MemHardFaults | NetErrors => Unit::PerSec,
+            CpuBusy | CpuKernel | MemCommit | MemPhysical | DiskBusy => Unit::Percent,
+            NetDown | NetUp | DiskRead | DiskWrite | MemPageIns => Unit::BytesPerSec,
+            NetErrors => Unit::PerSec,
             DiskResponse => Unit::Millis,
             CpuQueue | DiskQueue => Unit::Count,
         }
@@ -204,6 +210,44 @@ pub struct Sample {
     pub at: u64,
     pub values: [f64; Metric::ALL.len()],
     pub per_core: Vec<f32>,
+    /// Each physical disk, for the Verdict's disk rule (spec `rules/verdict.md`, Local rules).
+    #[serde(default)]
+    pub disks: Vec<Disk>,
+    #[serde(default)]
+    pub pressure: Pressure,
+}
+
+/// One physical disk's load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Disk {
+    /// Share of time with at least one request in flight, %.
+    #[serde(rename = "DiskBusy")]
+    pub busy: f64,
+    /// Mean time per completed request, ms.
+    #[serde(rename = "DiskResponse")]
+    pub response_ms: f64,
+}
+
+/// The Memory Pressure level, as the OS judges it (spec `CONTEXT.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Pressure {
+    #[default]
+    Normal,
+    Warn,
+    Critical,
+}
+
+impl Pressure {
+    /// Windows reports no level, so it is derived from commit charge: at 90% of the commit
+    /// limit processes start failing to commit memory (spec `rules/verdict.md`).
+    pub fn from_commit(commit_pct: f64) -> Pressure {
+        if commit_pct >= 90.0 {
+            Pressure::Critical
+        } else {
+            Pressure::Normal
+        }
+    }
 }
 
 impl Sample {

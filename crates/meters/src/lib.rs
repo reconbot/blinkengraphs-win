@@ -244,14 +244,14 @@ pub fn tooltip(
     let body = match section {
         Section::Cpu => format!(
             "CPU {:.0}%  kernel {:.0}%",
-            get(Metric::CpuTotal),
+            get(Metric::CpuBusy),
             get(Metric::CpuKernel)
         ),
         Section::Memory => format!(
             "Commit {:.0}%  RAM {:.0}%  {:.0} faults/s",
             get(Metric::MemCommit),
             get(Metric::MemPhysical),
-            get(Metric::MemHardFaults)
+            get(Metric::MemPageIns)
         ),
         Section::Network => format!(
             "Down {}/s  Up {}/s",
@@ -260,7 +260,7 @@ pub fn tooltip(
         ),
         Section::Disk => format!(
             "Disk {:.0}% busy  {:.0} ms",
-            get(Metric::DiskActive),
+            get(Metric::DiskBusy),
             get(Metric::DiskResponse)
         ),
         Section::Latency => {

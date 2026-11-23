@@ -16,7 +16,7 @@ Download the x64 or ARM64 MSI from the [latest release](https://github.com/recon
 | Section | Meter (always visible) | Panel (on click) |
 |---|---|---|
 | CPU | total % | per-core, kernel share, top processes |
-| Memory | commit charge, hard faults | physical, compressed, top processes |
+| Memory | commit charge, paging in from disk | physical, compressed, top processes |
 | Network | down/up on the followed adapter | per adapter, errors |
 | Disk | active time % | MB/s, response time, queue |
 | Latency | RTT + loss to 1.1.1.1 | ICMP/TCP/DNS Probes to the gateway, Cloudflare and Quad9 over IPv4 and IPv6, and system DNS; per-hop trace |

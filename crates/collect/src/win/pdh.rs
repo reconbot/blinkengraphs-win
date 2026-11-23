@@ -12,12 +12,12 @@ use windows_sys::Win32::System::Performance::{
 
 // English paths so they resolve on every display language.
 const COUNTERS: [(Metric, &str); 10] = [
-    (Metric::CpuTotal, r"\Processor(_Total)\% Processor Time"),
+    (Metric::CpuBusy, r"\Processor(_Total)\% Processor Time"),
     (Metric::CpuKernel, r"\Processor(_Total)\% Privileged Time"),
     (Metric::CpuQueue, r"\System\Processor Queue Length"),
     (Metric::MemCommit, r"\Memory\% Committed Bytes In Use"),
-    (Metric::MemHardFaults, r"\Memory\Pages Input/sec"),
-    (Metric::DiskActive, r"\PhysicalDisk(_Total)\% Idle Time"),
+    (Metric::MemPageIns, r"\Memory\Pages Input/sec"),
+    (Metric::DiskBusy, r"\PhysicalDisk(_Total)\% Idle Time"),
     (
         Metric::DiskRead,
         r"\PhysicalDisk(_Total)\Disk Read Bytes/sec",
@@ -36,11 +36,15 @@ const COUNTERS: [(Metric, &str); 10] = [
     ),
 ];
 const PER_CORE: &str = r"\Processor(*)\% Processor Time";
+const DISK_IDLE: &str = r"\PhysicalDisk(*)\% Idle Time";
+const DISK_PER_TRANSFER: &str = r"\PhysicalDisk(*)\Avg. Disk sec/Transfer";
 
 pub struct Query {
     query: PDH_HQUERY,
     counters: Vec<(Metric, PDH_HCOUNTER)>,
     per_core: Option<PDH_HCOUNTER>,
+    /// Per physical disk: `% Idle Time` and `Avg. Disk sec/Transfer`.
+    disks: Option<(PDH_HCOUNTER, PDH_HCOUNTER)>,
     items: Vec<u64>,
 }
 
@@ -58,18 +62,20 @@ impl Query {
             query,
             counters: Vec::with_capacity(COUNTERS.len()),
             per_core: None,
+            disks: None,
             items: Vec::new(),
         };
         for (metric, path) in COUNTERS {
             match q.add(path) {
                 Ok(h) => q.counters.push((metric, h)),
                 // Without CPU total the counter set is broken (`lodctr /r` repairs it); report it.
-                Err(e) if metric == Metric::CpuTotal => return Err(e),
+                Err(e) if metric == Metric::CpuBusy => return Err(e),
                 // Disk counters can be switched off (`diskperf -n`); that Metric reads zero.
                 Err(_) => {}
             }
         }
         q.per_core = q.add(PER_CORE).ok();
+        q.disks = q.add(DISK_IDLE).ok().zip(q.add(DISK_PER_TRANSFER).ok());
         Ok(q)
     }
 
@@ -91,11 +97,16 @@ impl Query {
             s.set(metric, calc::from_pdh(metric, value(h)));
         }
         if let Some(h) = self.per_core {
-            s.per_core = self.cores(h);
+            s.per_core = calc::order_cores(self.instances(h));
+        }
+        if let Some((idle, per_transfer)) = self.disks {
+            let idle = self.instances(idle);
+            s.disks = calc::disks(idle, self.instances(per_transfer));
         }
     }
 
-    fn cores(&mut self, h: PDH_HCOUNTER) -> Vec<f32> {
+    /// Every instance of a wildcard counter, by name.
+    fn instances(&mut self, h: PDH_HCOUNTER) -> Vec<(String, f64)> {
         // Item names point into the same buffer, after the items.
         let mut bytes = (self.items.len() * 8) as u32;
         for _ in 0..3 {
@@ -115,14 +126,17 @@ impl Query {
                             count as usize,
                         )
                     };
-                    return calc::order_cores(items.iter().map(|i| {
-                        let v = if valid(i.FmtValue.CStatus) {
-                            unsafe { i.FmtValue.Anonymous.doubleValue }
-                        } else {
-                            0.0
-                        };
-                        (unsafe { from_wide_ptr(i.szName) }, v)
-                    }));
+                    return items
+                        .iter()
+                        .map(|i| {
+                            let v = if valid(i.FmtValue.CStatus) {
+                                unsafe { i.FmtValue.Anonymous.doubleValue }
+                            } else {
+                                0.0
+                            };
+                            (unsafe { from_wide_ptr(i.szName) }, v)
+                        })
+                        .collect();
                 }
                 PDH_MORE_DATA => self.items.resize((bytes as usize).div_ceil(8), 0),
                 _ => return Vec::new(),

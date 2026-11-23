@@ -203,8 +203,9 @@ impl History {
         if let Some(open) = h.pauses.iter_mut().find(|p| p.end.is_infinite()) {
             open.end = end;
             h.unwritten_pauses.push(*open);
-        } else if let Some(at) = newest {
-            let p = Pause::after_kill(at, launch, h.limits.settle_s);
+        } else {
+            let newest = newest.max(h.store.alive());
+            let p = Pause::at_launch(newest, launch, h.limits.settle_s);
             if p.begin < p.end {
                 h.pauses.push(p);
                 h.unwritten_pauses.push(p);
@@ -212,6 +213,12 @@ impl History {
         }
         h.storage = h.measure();
         h
+    }
+
+    /// Measuring goes on at `now`, though nothing may be recorded, as while Offline: Raw gets
+    /// a mark on its next write, so a kill's Pause doesn't swallow this stretch.
+    pub fn alive(&mut self, now: u64) {
+        self.maintain(now);
     }
 
     /// Measuring stops at `at`; Raw reaches disk now, so a kill during the Pause loses nothing.
@@ -634,7 +641,7 @@ impl History {
     fn write_raw(&mut self) {
         let oldest = self.raw_floor().saturating_sub(1);
         self.store
-            .write_raw(&self.unwritten, &self.unwritten_pauses, oldest);
+            .write_raw(&self.unwritten, &self.unwritten_pauses, oldest, self.clock);
         self.unwritten.clear();
         self.unwritten_pauses.clear();
         self.raw_written_at = self.clock;
@@ -1106,8 +1113,10 @@ mod tests {
 
     #[test]
     fn since_pause_counts_from_the_end_of_the_settle_time() {
-        let mut h = History::open(None, limits());
-        assert_eq!(h.since_pause_s(100.0), None);
+        // A first launch is a Pause too: from the launch to the settle time after it.
+        let mut h = History::open_at(None, limits(), 0.0);
+        assert_eq!(h.since_pause_s(1.0), Some(0));
+        assert_eq!(h.since_pause_s(50.0), Some(48));
         h.begin_pause(100.0);
         assert_eq!(h.since_pause_s(150.0), Some(0));
         h.end_pause(160.0);
@@ -1120,13 +1129,14 @@ mod tests {
         let db = TempDb::new("kill-pause");
         let t0 = recent_start();
         {
-            let mut h = History::open(Some(&db.0), limits());
+            let mut h = History::open_at(Some(&db.0), limits(), (t0 - 10) as f64);
             feed(&mut h, t0, t0 + 20, |_| Some(5.0));
             // Dropped without close: only what reached disk survives.
         }
         let launch = (t0 + 400) as f64 + 0.5;
         let h = History::open_at(Some(&db.0), limits(), launch);
-        let p = h.pauses();
+        // The first launch's Pause, then the kill's.
+        let p = &h.pauses()[1..];
         assert_eq!(p.len(), 1);
         // The second after the newest result on disk, which is at most RAW_WRITE_S old.
         let begin = p[0].begin as u64;
@@ -1135,11 +1145,43 @@ mod tests {
     }
 
     #[test]
+    fn a_first_launch_begins_with_a_pause() {
+        let h = History::open_at(None, limits(), 1000.5);
+        assert_eq!(
+            h.pauses(),
+            [Pause {
+                begin: 1000.5,
+                end: 1002.5
+            }]
+        );
+    }
+
+    #[test]
+    fn a_kill_after_an_offline_stretch_keeps_that_stretch_measured() {
+        let db = TempDb::new("offline-kill");
+        let t0 = recent_start();
+        {
+            let mut h = History::open_at(Some(&db.0), limits(), (t0 - 10) as f64);
+            feed(&mut h, t0, t0 + 20, |_| Some(5.0));
+            // Offline: nothing to record, but measuring goes on.
+            for t in t0 + 20..t0 + 120 {
+                h.alive(t);
+            }
+        }
+        let h = History::open_at(Some(&db.0), limits(), (t0 + 400) as f64);
+        let begin = h.pauses()[1].begin as u64;
+        assert!(
+            (t0 + 120 - RAW_WRITE_S..=t0 + 120).contains(&begin),
+            "{begin}"
+        );
+    }
+
+    #[test]
     fn a_shutdown_pause_ends_at_the_next_launch_plus_settle() {
         let db = TempDb::new("shutdown-pause");
         let t0 = recent_start();
         {
-            let mut h = History::open(Some(&db.0), limits());
+            let mut h = History::open_at(Some(&db.0), limits(), (t0 - 10) as f64);
             feed(&mut h, t0, t0 + 20, |_| Some(5.0));
             h.begin_pause((t0 + 20) as f64 + 0.25);
             h.close(t0 + 20);
@@ -1147,7 +1189,7 @@ mod tests {
         let launch = (t0 + 600) as f64;
         let h = History::open_at(Some(&db.0), limits(), launch);
         assert_eq!(
-            h.pauses(),
+            h.pauses()[1..],
             vec![Pause {
                 begin: (t0 + 20) as f64 + 0.25,
                 end: launch + 2.0

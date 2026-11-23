@@ -25,11 +25,38 @@ pub fn from_pdh(metric: Metric, raw: f64) -> f64 {
         return 0.0;
     }
     match metric {
-        Metric::DiskActive => (100.0 - raw).clamp(0.0, 100.0),
+        Metric::DiskBusy => (100.0 - raw).clamp(0.0, 100.0),
         Metric::DiskResponse => (raw * 1000.0).max(0.0),
-        Metric::CpuTotal | Metric::CpuKernel | Metric::MemCommit => raw.clamp(0.0, 100.0),
+        // `\Memory\Pages Input/sec` counts pages; Windows pages are 4 KiB on x64 and ARM64.
+        Metric::MemPageIns => (raw * 4096.0).max(0.0),
+        Metric::CpuBusy | Metric::CpuKernel | Metric::MemCommit => raw.clamp(0.0, 100.0),
         _ => raw.max(0.0),
     }
+}
+
+/// Each physical disk from `\PhysicalDisk(*)` instances of `% Idle Time` and
+/// `Avg. Disk sec/Transfer`, matched by name and in name order; `_Total` is not a disk.
+pub fn disks(
+    idle: impl IntoIterator<Item = (String, f64)>,
+    per_transfer: impl IntoIterator<Item = (String, f64)>,
+) -> Vec<model::Disk> {
+    let response: HashMap<String, f64> = per_transfer.into_iter().collect();
+    let mut out: Vec<(String, model::Disk)> = idle
+        .into_iter()
+        .filter(|(name, _)| name != "_Total")
+        .map(|(name, idle)| {
+            let disk = model::Disk {
+                busy: from_pdh(Metric::DiskBusy, idle),
+                response_ms: from_pdh(
+                    Metric::DiskResponse,
+                    response.get(&name).copied().unwrap_or(0.0),
+                ),
+            };
+            (name, disk)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.into_iter().map(|(_, d)| d).collect()
 }
 
 /// `\Processor(*)` instances are "0", "1", … plus "_Total"; PDH does not return them in index order.
@@ -38,7 +65,7 @@ pub fn order_cores(instances: impl IntoIterator<Item = (String, f64)>) -> Vec<f3
         .into_iter()
         .filter_map(|(name, v)| {
             let i = name.parse().ok()?;
-            Some((i, from_pdh(Metric::CpuTotal, v) as f32))
+            Some((i, from_pdh(Metric::CpuBusy, v) as f32))
         })
         .collect();
     cores.sort_by_key(|&(i, _)| i);
@@ -160,6 +187,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disks_pair_idle_with_response_and_drop_the_total() {
+        let d = disks(
+            [
+                ("1 D:".to_string(), 5.0),
+                ("_Total".to_string(), 50.0),
+                ("0 C:".to_string(), 100.0),
+            ],
+            [("0 C:".to_string(), 0.0012), ("1 D:".to_string(), 0.062)],
+        );
+        assert_eq!(
+            d,
+            [
+                model::Disk {
+                    busy: 0.0,
+                    response_ms: 1.2
+                },
+                model::Disk {
+                    busy: 95.0,
+                    response_ms: 62.0
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn delta_of_reset_counter_is_zero() {
         assert_eq!(counter_delta(100, 250), 150);
         assert_eq!(counter_delta(250, 100), 0);
@@ -182,11 +234,11 @@ mod tests {
 
     #[test]
     fn pdh_values_become_metric_units() {
-        assert_eq!(from_pdh(Metric::DiskActive, 70.0), 30.0);
-        assert_eq!(from_pdh(Metric::DiskActive, 104.0), 0.0);
-        assert_eq!(from_pdh(Metric::DiskActive, -3.0), 100.0);
+        assert_eq!(from_pdh(Metric::DiskBusy, 70.0), 30.0);
+        assert_eq!(from_pdh(Metric::DiskBusy, 104.0), 0.0);
+        assert_eq!(from_pdh(Metric::DiskBusy, -3.0), 100.0);
         assert_eq!(from_pdh(Metric::DiskResponse, 0.004), 4.0);
-        assert_eq!(from_pdh(Metric::CpuTotal, 100.5), 100.0);
+        assert_eq!(from_pdh(Metric::CpuBusy, 100.5), 100.0);
         assert_eq!(from_pdh(Metric::DiskRead, f64::NAN), 0.0);
         assert_eq!(from_pdh(Metric::CpuQueue, 3.0), 3.0);
     }

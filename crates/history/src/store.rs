@@ -57,6 +57,7 @@ impl Store {
                    archive INTEGER NOT NULL, m INTEGER NOT NULL, secs REAL NOT NULL,
                    PRIMARY KEY (archive, m)) WITHOUT ROWID;
                  CREATE TABLE IF NOT EXISTS cursor (archive INTEGER PRIMARY KEY, m INTEGER NOT NULL);
+                 CREATE TABLE IF NOT EXISTS mark (one INTEGER PRIMARY KEY CHECK (one = 1), at INTEGER NOT NULL);
                  PRAGMA user_version = {SCHEMA};"
             ))
             .ok()?;
@@ -118,14 +119,21 @@ impl Store {
 
     /// Appends Raw results and records Pauses in one transaction, and drops Raw and Pauses
     /// older than `oldest`.
+    /// Also records a mark at `now`: measuring went on, though nothing else may be in this
+    /// write (spec `rules/history.md`, Raw). Only the newest mark matters, so one row holds it.
     pub fn write_raw(
         &mut self,
         results: &[(String, u64, Option<f32>)],
         pauses: &[Pause],
         oldest: u64,
+        now: u64,
     ) {
         let Some(c) = &mut self.db else { return };
         let Ok(tx) = c.transaction() else { return };
+        let _ = tx.execute(
+            "INSERT OR REPLACE INTO mark VALUES (1, ?1)",
+            params![now as i64],
+        );
         for (key, at, v) in results {
             self.seq += 1;
             let _ = tx.execute("INSERT OR IGNORE INTO key (name) VALUES (?1)", params![key]);
@@ -143,6 +151,16 @@ impl Store {
         let _ = tx.execute("DELETE FROM raw WHERE at <= ?1", params![oldest as i64]);
         let _ = tx.execute("DELETE FROM pause WHERE end <= ?1", params![oldest as f64]);
         let _ = tx.commit();
+    }
+
+    /// The newest mark: when measuring was last known to go on.
+    pub fn alive(&self) -> Option<u64> {
+        let c = self.db.as_ref()?;
+        c.query_row("SELECT at FROM mark WHERE one = 1", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .ok()
+        .map(|at| at as u64)
     }
 
     pub fn cursor(&self, archive: usize) -> Option<u64> {

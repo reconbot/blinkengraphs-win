@@ -13,12 +13,8 @@ struct Fake {
 
 impl Sensors for Fake {
     fn sample(&mut self) -> Option<Sample> {
-        let mut s = Sample {
-            at: 0,
-            values: [0.0; Metric::ALL.len()],
-            per_core: vec![],
-        };
-        s.set(Metric::CpuTotal, 0.2);
+        let mut s = Sample::default();
+        s.set(Metric::CpuBusy, 0.2);
         Some(s)
     }
     fn processes(&mut self, _: usize) -> Vec<ProcessRow> {
@@ -51,7 +47,8 @@ fn monitor(fake: Fake, idle: bool) -> Monitor<Fake> {
 fn monitor_with(fake: Fake, idle: IdleCheck) -> Monitor<Fake> {
     let config = Config::default();
     let shared = Arc::new(Mutex::new(Shared {
-        history: History::open(None, config.history_limits()),
+        // Launched at 0, so the first-launch Pause sits far before the tests' WALL.
+        history: History::open_at(None, config.history_limits(), 0.0),
         findings: vec![],
         processes: vec![],
         adapters: vec![],
@@ -140,8 +137,10 @@ fn network_facts_reach_the_verdict() {
     assert!(domains(&m).contains(&FaultDomain::CaptivePortal));
 }
 
+/// The Pauses the test made: all but the first launch's.
 fn pauses(m: &Monitor<Fake>) -> Vec<history::pause::Pause> {
-    m.shared.lock().unwrap().history.pauses()
+    let p = m.shared.lock().unwrap().history.pauses();
+    p.into_iter().filter(|p| p.begin > 1.0).collect()
 }
 
 fn settle() -> f64 {
@@ -324,4 +323,85 @@ fn links_known_at_start_leave_no_unlinked_series() {
     let keys = s.history.series_keys();
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].0, Some(s.links[0].id.clone()));
+}
+
+fn round_on(link: &model::Link, start: f64, end: f64) -> probe::Round {
+    probe::Round {
+        link: Some(link.id.clone()),
+        ..round(start, end)
+    }
+}
+
+#[test]
+fn a_link_that_appears_waits_its_settle_and_the_others_go_on() {
+    let fake = Fake::default();
+    let wired = link(1, "Ethernet", true);
+    *fake.links.lock().unwrap() = vec![wired.clone()];
+    let links = fake.links.clone();
+    let mut m = monitor(fake, false);
+    let t0 = Instant::now();
+    m.tick(t0, WALL);
+    let wifi = link(2, "Wi-Fi", false);
+    links.lock().unwrap().push(wifi.clone());
+    m.tick(t0 + Duration::from_secs(10), WALL + 10.0);
+    m.round(round_on(&wifi, WALL + 10.5, WALL + 10.6));
+    m.round(round_on(&wired, WALL + 10.5, WALL + 10.6));
+    m.round(round_on(
+        &wifi,
+        WALL + 10.0 + settle() + 0.1,
+        WALL + 10.0 + settle() + 0.2,
+    ));
+    let h = &m.shared.lock().unwrap().history;
+    let on = |l: &model::Link| {
+        h.recent(
+            &history::Key::Probe(Some(l.id.clone()), Config::default().primary),
+            10,
+        )
+        .len()
+    };
+    assert_eq!((on(&wired), on(&wifi)), (1, 1));
+    assert!(
+        h.pauses().iter().all(|p| p.begin < 1.0),
+        "a Link settle is not a Pause"
+    );
+}
+
+#[test]
+fn under_a_vpn_the_gateway_probes_are_the_carrying_link_s() {
+    let mut vpn = link(3, "WireGuard", true);
+    vpn.kind = model::LinkKind::Vpn;
+    vpn.id.gateway = None;
+    let wifi = link(2, "Wi-Fi", false);
+    let mut h = History::open_at(None, Config::default().history_limits(), 0.0);
+    let gw = model::Probe {
+        target: model::Target::Gateway,
+        protocol: model::Protocol::Icmp,
+    };
+    let one = model::Probe {
+        target: model::Target::Addr("1.1.1.1".parse().unwrap()),
+        protocol: model::Protocol::Icmp,
+    };
+    for t in AT - 20..AT {
+        let r = |p: &model::Probe, rtt| model::ProbeResult {
+            probe: p.clone(),
+            at: t,
+            rtt_ms: rtt,
+        };
+        h.record_round(Some(&wifi.id), &[r(&gw, None)], &[]);
+        h.record_round(
+            Some(&vpn.id),
+            &[r(&gw, Some(40.0)), r(&one, Some(30.0))],
+            &[],
+        );
+    }
+    h.set_followed(Some(vpn.id.clone()), AT);
+    let (probes, via_vpn) = verdict_probes(&h, &[vpn, wifi], AT, &[]);
+    assert!(via_vpn);
+    let gateway: Vec<_> = probes.iter().filter(|(p, _)| *p == gw).collect();
+    assert_eq!(gateway.len(), 1);
+    assert_eq!(
+        gateway[0].1.loss, 1.0,
+        "the Wi-Fi Gateway's, not the tunnel's"
+    );
+    assert!(probes.iter().any(|(p, _)| *p == one));
 }

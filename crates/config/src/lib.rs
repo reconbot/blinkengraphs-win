@@ -433,10 +433,10 @@ impl Default for Config {
             graph_aggregate: d.graph_aggregate,
             probe_views: Default::default(),
             sections: vec![
-                all(&[CpuTotal]),
+                all(&[CpuBusy]),
                 all(&[MemCommit]),
                 all(&[NetDown, NetUp]),
-                SectionConfig::new(Section::Disk, &m(&[DiskActive]), &[], &m(&[DiskActive])),
+                SectionConfig::new(Section::Disk, &m(&[DiskBusy]), &[], &m(&[DiskBusy])),
                 SectionConfig::new(Section::Latency, &ping, &ping, &ping),
             ],
             adapter: Adapter::FollowDefaultRoute,
@@ -670,12 +670,13 @@ mod tests {
         .unwrap();
         let cpu = c.section(Section::Cpu);
         let ids = |l: &[Readout]| l.iter().map(|r| r.label()).collect::<Vec<_>>();
-        assert_eq!(ids(&cpu.tray), ["Total", "Kernel"]);
-        assert_eq!(ids(&cpu.strip), ["Total"]);
-        assert_eq!(ids(&cpu.panel), ["Total"]);
+        // Saved before spec 6.0.0 renamed them: CpuTotal is CpuBusy, DiskActive is DiskBusy.
+        assert_eq!(ids(&cpu.tray), ["Busy", "Kernel"]);
+        assert_eq!(ids(&cpu.strip), ["Busy"]);
+        assert_eq!(ids(&cpu.panel), ["Busy"]);
         let disk = c.section(Section::Disk);
         assert!(disk.tray.is_empty() && disk.strip.is_empty());
-        assert_eq!(ids(&disk.panel), ["Active time"]);
+        assert_eq!(ids(&disk.panel), ["Busy"]);
         let ping = c.section(Section::Latency);
         assert_eq!(ids(&ping.strip), ["Latency", "Loss"]);
         assert_eq!(Config::parse(&c.to_toml()).unwrap(), c, "round-trips");

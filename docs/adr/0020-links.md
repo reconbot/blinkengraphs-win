@@ -10,6 +10,8 @@ Spec 5.0.0 measures each active Link (Ethernet, Wi-Fi, a VPN) on its own, keeps 
   - A Link's Gateway Probe goes to its own Gateway.
 - **A Target goes out on a Link only if that Link routes it.** `GetBestRoute2` is constrained to the Link's NET_LUID, and the route must leave through it. Otherwise the Probe records nothing, as for an unreachable IP version. A split-tunnel VPN therefore measures only what it carries.
 - **History follows one Link.** That is the pinned adapter's Link, or else the one carrying the default route (spec #50). The Verdict, the Meters and `History::now` speak for it, and the Panel draws every Link, or one picked. Its changes mark the 1m, 15m and 1h graphs.
+- **A Link that appears or changes waits the settle time.** Its Rounds in `[change, change + settle)` are dropped, while the other Links go on; it is not a Pause (spec gap 2).
+- **A VPN is a followed Link whose kind is `Vpn`.** The Verdict then sets `via_vpn`. A tunnel has no Gateway of its own, so the Verdict's Gateway Probes are those of the first Link that is not a tunnel (spec gap 1). This rests on the unverified `IfType` classing below.
 - **No Links listed** happens off Windows, in tests and on screenshots. Probes then go where the OS routes them, keyed with no Link, as before.
 
 ## Not yet verified on a machine (research 07)

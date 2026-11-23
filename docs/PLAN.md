@@ -34,7 +34,7 @@ Budget: under 1% CPU and about 30 MB RAM when idle with the Panel closed. These 
 | Section | Metrics |
 |---|---|
 | CPU | ★ total %, kernel share, per-core (Panel), processor queue length |
-| Memory | ★ commit charge % (Memory Pressure), ★ hard faults/s (as color), physical in-use %, compressed |
+| Memory | ★ commit charge % (Memory Pressure), ★ paging in from disk, bytes/s (as color), physical in-use %, compressed |
 | Network | ★ download/upload throughput on the Followed Adapter (cube-root scale), errors/discards, per-adapter (Panel) |
 | Disk | ★ active time %, read/write MB/s, average response ms, queue length |
 | Latency | ★ RTT to the primary Target, ★ loss (red bars), jitter, per-Probe lines (Panel), Hop Traces (Panel) |
