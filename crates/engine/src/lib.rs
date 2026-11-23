@@ -7,6 +7,7 @@ use history::History;
 use model::{Metric, Probe, ProbeStat, ProcessRow, Sample};
 use probe::{Event, ProbeGroup, Prober};
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -191,22 +192,15 @@ fn adapter(c: &Config) -> AdapterChoice {
 /// (spec `rules/verdict.md` inputs): Probe stats in `order`, the last Sample, the upload peak.
 /// `order` is Probe Group order, so a tie names the Target listed first; Probes absent from
 /// it follow. Probes with an empty window have no stats and are left out.
-pub fn diagnose(h: &History, net: &Network, now: u64, order: &[Probe]) -> Vec<Finding> {
+pub fn diagnose(
+    h: &History,
+    net: &Network,
+    now: u64,
+    order: &[Probe],
+    links: &[model::Link],
+) -> Vec<Finding> {
     let since_pause_s = h.since_pause_s(now as f64);
-    let mut probes: Vec<(Probe, ProbeStat)> = h
-        .probes()
-        .into_iter()
-        .filter_map(|p| {
-            let st = h.now(&p, now)?;
-            Some((p, st))
-        })
-        .collect();
-    probes.sort_by_key(|(p, _)| {
-        (
-            order.iter().position(|o| o == p).unwrap_or(usize::MAX),
-            p.to_string(),
-        )
-    });
+    let (probes, tunnel) = verdict_probes(h, links, now, order);
     let peak = h
         .recent(&history::Key::Metric(Metric::NetUp), usize::MAX)
         .into_iter()
@@ -217,11 +211,57 @@ pub fn diagnose(h: &History, net: &Network, now: u64, order: &[Probe]) -> Vec<Fi
         probes: &probes,
         upload_peak_bps: peak,
         path_up: net.path_up,
-        via_vpn: net.via_vpn,
+        via_vpn: net.via_vpn || tunnel,
         captive_portal: net.captive_portal,
         since_pause_s,
         window_s: h.window_s(),
     })
+}
+
+/// The followed Link's Probe stats in `order`, and whether that Link is a VPN tunnel. A tunnel
+/// has no Gateway of its own, so its Gateway Probes are those of the Link carrying it: the
+/// first active Link that is not a tunnel (spec `rules/verdict.md`, Input).
+pub fn verdict_probes(
+    h: &History,
+    links: &[model::Link],
+    now: u64,
+    order: &[Probe],
+) -> (Vec<(Probe, ProbeStat)>, bool) {
+    let followed = h.followed();
+    let tunnel = followed
+        .and_then(|f| links.iter().find(|l| &l.id == f))
+        .is_some_and(|l| l.kind == model::LinkKind::Vpn);
+    let carrier = links
+        .iter()
+        .find(|l| l.kind != model::LinkKind::Vpn)
+        .map(|l| &l.id)
+        .filter(|_| tunnel);
+    let mut probes: Vec<(Probe, ProbeStat)> = h
+        .probes()
+        .into_iter()
+        .filter(|p| carrier.is_none() || p.target != model::Target::Gateway)
+        .filter_map(|p| {
+            let st = h.now(&p, now)?;
+            Some((p, st))
+        })
+        .collect();
+    if let Some(c) = carrier {
+        for (l, p) in h.series_keys() {
+            if l.as_ref() == Some(c)
+                && p.target == model::Target::Gateway
+                && let Some(st) = h.now_on(Some(c), &p, now)
+            {
+                probes.push((p, st));
+            }
+        }
+    }
+    probes.sort_by_key(|(p, _)| {
+        (
+            order.iter().position(|o| o == p).unwrap_or(usize::MAX),
+            p.to_string(),
+        )
+    });
+    (probes, tunnel)
 }
 
 /// Every Probe in Probe Group order.
@@ -276,6 +316,8 @@ struct Monitor<S> {
     /// The last reading of `Sensors::slept_s`, and when it was taken.
     slept: Option<(f64, f64)>,
     settle_s: f64,
+    /// Per Link, the stretches after it appeared or changed that cut its own Rounds.
+    settles: HashMap<model::LinkId, Vec<history::pause::Pause>>,
     next_sample: Instant,
     next_procs: Instant,
     next_adapters: Instant,
@@ -305,6 +347,7 @@ impl<S: Sensors> Monitor<S> {
             suspended: false,
             slept: None,
             settle_s: config::defaults::get().history.settle_s,
+            settles: HashMap::new(),
             next_sample: now,
             next_procs: now,
             next_adapters: now,
@@ -372,6 +415,11 @@ impl<S: Sensors> Monitor<S> {
         if s.history.cut(r.start, r.end) {
             return;
         }
+        if let Some(settles) = r.link.as_ref().and_then(|l| self.settles.get(l))
+            && history::pause::cut(r.start, r.end, settles)
+        {
+            return;
+        }
         // A Round sent with no Link went where the OS routed it: the default-route Link.
         let link = r.link.or_else(|| {
             s.links
@@ -384,14 +432,25 @@ impl<S: Sensors> Monitor<S> {
 
     /// Takes up the Links up now: on a change, every Probe Group runs on each of them, and
     /// History follows the Followed Adapter's.
-    fn update_links(&mut self, links: Vec<model::Link>, at: u64) {
+    fn update_links(&mut self, links: Vec<model::Link>, wall: f64) {
         let mut s = self.shared.lock().unwrap();
         if links != s.links {
+            // A Link that appeared, or whose Gateway or IP versions changed, waits the
+            // settle time (spec `rules/history.md`, Link settle); the others go on.
+            for l in links.iter().filter(|l| !s.links.contains(l)) {
+                let settle = history::pause::link_settle(&[wall], self.settle_s);
+                self.settles.entry(l.id.clone()).or_default().extend(settle);
+            }
+            self.settles
+                .retain(|id, _| links.iter().any(|l| &l.id == id));
+            for v in self.settles.values_mut() {
+                v.retain(|p| p.end > wall - 60.0);
+            }
             self.prober.reconfigure(groups_on(&self.config, &links));
             s.links = links;
         }
         let f = followed(&self.config, &s.links);
-        s.history.set_followed(f, at);
+        s.history.set_followed(f, wall as u64);
     }
 
     /// A suspend Windows never announced, such as a critical one, shows as time asleep that
@@ -439,6 +498,8 @@ impl<S: Sensors> Monitor<S> {
         if !self.measuring() {
             return false;
         }
+        // Measuring goes on even when nothing gets recorded, as while Offline.
+        self.shared.lock().unwrap().history.alive(at);
         let Some(mut sample): Option<Sample> = self.sensors.sample() else {
             return false;
         };
@@ -450,7 +511,7 @@ impl<S: Sensors> Monitor<S> {
         let adapters = (now >= self.next_adapters).then(|| {
             self.next_adapters = now + Duration::from_secs(10);
             let links = self.sensors.links();
-            self.update_links(links, at);
+            self.update_links(links, wall);
             self.sensors.adapters()
         });
         let net = self.sensors.network();
@@ -463,7 +524,7 @@ impl<S: Sensors> Monitor<S> {
         if let Some(a) = adapters {
             s.adapters = a;
         }
-        s.findings = diagnose(&s.history, &net, at, &probe_order(&self.config));
+        s.findings = diagnose(&s.history, &net, at, &probe_order(&self.config), &s.links);
         s.sample_count += 1;
         true
     }

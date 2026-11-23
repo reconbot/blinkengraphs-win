@@ -573,8 +573,8 @@ fn history_raw() {
         assert_eq!(json!(kept), c["expected"], "history/raw {}", c["name"]);
     }
     for c in v["kill"].as_array().unwrap() {
-        let p = Pause::after_kill(
-            c["newest_at"].as_u64().unwrap(),
+        let p = Pause::at_launch(
+            c["newest_at"].as_u64(),
             c["launch"].as_f64().unwrap(),
             c["settle_s"].as_f64().unwrap(),
         );

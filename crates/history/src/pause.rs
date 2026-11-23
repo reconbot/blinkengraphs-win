@@ -8,14 +8,28 @@ pub struct Pause {
 }
 
 impl Pause {
-    /// The Pause a kill leaves, found on the next launch: from the second after the newest
-    /// `at` in Raw to the settle time after launch.
-    pub fn after_kill(newest_at: u64, launch: f64, settle_s: f64) -> Pause {
+    /// The Pause a launch finds: from the second after the newest record of any kind in Raw
+    /// (a result, a Sample, a mark or a Link change), or from the launch when Raw is empty, to
+    /// the settle time after launch.
+    pub fn at_launch(newest_record: Option<u64>, launch: f64, settle_s: f64) -> Pause {
         Pause {
-            begin: newest_at as f64 + 1.0,
+            begin: newest_record.map_or(launch, |at| at as f64 + 1.0),
             end: launch + settle_s,
         }
     }
+}
+
+/// What a Link's appearances and changes at `changes` cut of its own Rounds: the settle time
+/// after each. Not Pauses: they belong to one Link and nothing is Paused in History (spec
+/// `rules/history.md`, Link settle).
+pub fn link_settle(changes: &[f64], settle_s: f64) -> Vec<Pause> {
+    changes
+        .iter()
+        .map(|&c| Pause {
+            begin: c,
+            end: c + settle_s,
+        })
+        .collect()
 }
 
 /// Whether a Round from `start` to the end of its last Probe falls in any Pause, so it records
