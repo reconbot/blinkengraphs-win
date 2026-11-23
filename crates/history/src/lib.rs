@@ -1236,6 +1236,7 @@ mod tests {
         LinkId {
             luid,
             gateway: Some("192.168.1.1".parse().unwrap()),
+            gateway_mac: None,
         }
     }
 
@@ -1273,6 +1274,17 @@ mod tests {
         let k = Key::Probe(Some(link(0xabc)), probe());
         assert_eq!(Key::from_id(&k.id()), Some(k));
         let k = Key::Probe(None, probe());
+        assert_eq!(Key::from_id(&k.id()), Some(k));
+        let with_mac = LinkId {
+            gateway_mac: Some([0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e]),
+            ..link(0xabc)
+        };
+        let k = Key::Probe(Some(with_mac), probe());
+        assert!(
+            k.id().ends_with("@192.168.1.1/00-1a-2b-3c-4d-5e"),
+            "{}",
+            k.id()
+        );
         assert_eq!(Key::from_id(&k.id()), Some(k));
     }
 

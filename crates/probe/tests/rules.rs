@@ -243,6 +243,7 @@ fn wifi() -> Link {
         id: LinkId {
             luid: 7,
             gateway: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
+            gateway_mac: None,
         },
         alias: "Wi-Fi".into(),
         kind: LinkKind::WiFi,
