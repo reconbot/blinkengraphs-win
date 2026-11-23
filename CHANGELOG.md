@@ -1,5 +1,17 @@
 # Changelog
 
+## [4.0.0](https://github.com/reconbot/blinkengraphs-win/compare/v3.0.1...v4.0.0) (2026-11-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* the CPU, Disk and paging Metrics are renamed and paging is now bytes/s, so History restarts those three series.
+
+### Features
+
+* a Link's identity includes its Gateway's MAC address; pin spec v6.1.0 ([#55](https://github.com/reconbot/blinkengraphs-win/issues/55)) ([846103b](https://github.com/reconbot/blinkengraphs-win/commit/846103bccc8748ca864bcb9f9d8169223d6b2edc))
+* spec 6.0.0: VPN Gateway, Link settle, Raw marks, first-launch Pause, and platform-neutral Local Metrics ([#53](https://github.com/reconbot/blinkengraphs-win/issues/53)) ([60cbaa1](https://github.com/reconbot/blinkengraphs-win/commit/60cbaa116a61e6c9485b1370d6b5d7840dea9f21))
+
 ## [3.0.1](https://github.com/reconbot/blinkengraphs-win/compare/v3.0.0...v3.0.1) (2026-11-23)
 
 
