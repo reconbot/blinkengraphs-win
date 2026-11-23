@@ -8,4 +8,4 @@ Spec 5.0.0 replaces Minutes and the moving seam with Raw and three fixed-step Ar
 - **Each Archive has a cursor,** its first unwritten step, stored with the Rows. It skips empty stretches, so a week away costs a few queries rather than one per step.
 - **An older database starts empty.** `PRAGMA user_version` below 2 drops the `minute`, `recent` and `rollup` tables. The owner chose this over converting Minutes into Rows.
 - **The user's retention is All's length,** `archive_days`, 1 to 365, default 365 (A3's Rows kept). The old `rollup_days` key is ignored.
-- **Hop statistics stay in memory** until Links (#40) key them per Link.
+- **Hop results and followed-Link changes are in Raw too** (`hop` and `link_change` tables), kept as long as Raw. A restart rebuilds the Hop tables and the Link-change markers. Hops have no Archives (spec `rules/history.md`, Links).

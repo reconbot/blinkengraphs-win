@@ -127,6 +127,8 @@ pub struct History {
     store: Store,
     unwritten: Vec<(String, u64, Option<f32>)>,
     unwritten_pauses: Vec<Pause>,
+    unwritten_hops: Vec<(String, HopResult)>,
+    unwritten_links: Vec<(u64, Option<LinkId>)>,
     raw_written_at: u64,
     /// The newest `now` seen.
     clock: u64,
@@ -184,6 +186,8 @@ impl History {
             last_sample: None,
             unwritten: Vec::new(),
             unwritten_pauses: Vec::new(),
+            unwritten_hops: Vec::new(),
+            unwritten_links: Vec::new(),
             raw_written_at: 0,
             clock: 0,
             cursors,
@@ -199,6 +203,14 @@ impl History {
                 h.push(key, at, v);
             }
         }
+        // Hop rows and Link changes live in Raw too, so a restart keeps them.
+        for (series, mut hop) in h.store.load_hops(since) {
+            if let Some(Key::Probe(link, trace)) = Key::from_id(&series) {
+                hop.trace = trace;
+                h.track_hop(link, &hop);
+            }
+        }
+        h.link_changes = h.store.load_link_changes().into();
         let end = launch + h.limits.settle_s;
         if let Some(open) = h.pauses.iter_mut().find(|p| p.end.is_infinite()) {
             open.end = end;
@@ -302,6 +314,9 @@ impl History {
     pub fn set_followed(&mut self, link: Option<LinkId>, at: u64) {
         if self.link_changes.back().map(|c| &c.1) != Some(&link) {
             self.link_changes.push_back((at, link.clone()));
+            if self.store.persistent() {
+                self.unwritten_links.push((at, link.clone()));
+            }
         }
         self.followed = link;
     }
@@ -320,6 +335,14 @@ impl History {
     }
 
     fn hop_on(&mut self, link: Option<LinkId>, h: &HopResult) {
+        if self.store.persistent() {
+            let series = Key::Probe(link.clone(), h.trace.clone()).id();
+            self.unwritten_hops.push((series, h.clone()));
+        }
+        self.track_hop(link, h);
+    }
+
+    fn track_hop(&mut self, link: Option<LinkId>, h: &HopResult) {
         let track = self.hops.entry((link, h.trace.clone())).or_default();
         let i = h.ttl.saturating_sub(1) as usize;
         if track.len() <= i {
@@ -640,10 +663,18 @@ impl History {
 
     fn write_raw(&mut self) {
         let oldest = self.raw_floor().saturating_sub(1);
-        self.store
-            .write_raw(&self.unwritten, &self.unwritten_pauses, oldest, self.clock);
+        self.store.write_raw(&store::RawWrite {
+            results: &self.unwritten,
+            pauses: &self.unwritten_pauses,
+            hops: &self.unwritten_hops,
+            links: &self.unwritten_links,
+            oldest,
+            now: self.clock,
+        });
         self.unwritten.clear();
         self.unwritten_pauses.clear();
+        self.unwritten_hops.clear();
+        self.unwritten_links.clear();
         self.raw_written_at = self.clock;
     }
 
@@ -944,9 +975,10 @@ mod tests {
         }
     }
 
-    /// An hour before now, on a day boundary's 5-minute grid, so reopening keeps it in Raw.
+    /// One to two hours before now, on the hour: reopening keeps it in Raw, and the tests' few
+    /// minutes of results write A1 Rows but never an A2 one, whatever the wall clock says.
     fn recent_start() -> u64 {
-        (model::now() - 3600) / 300 * 300
+        (model::now() - 3600) / 3600 * 3600
     }
 
     #[test]
@@ -1286,6 +1318,36 @@ mod tests {
             k.id()
         );
         assert_eq!(Key::from_id(&k.id()), Some(k));
+    }
+
+    #[test]
+    fn hop_rows_and_link_changes_survive_a_restart() {
+        let db = TempDb::new("hops");
+        let t0 = recent_start();
+        let wifi = link(7);
+        let hop = |at, ttl, rtt| HopResult {
+            trace: probe(),
+            at,
+            ttl,
+            addr: Some(format!("10.0.0.{ttl}").parse().unwrap()),
+            rtt_ms: rtt,
+            reached: ttl == 2,
+        };
+        {
+            let mut h = History::open_at(Some(&db.0), limits(), (t0 - 10) as f64);
+            h.set_followed(Some(wifi.clone()), t0);
+            for t in t0..t0 + 20 {
+                h.record_round(Some(&wifi), &[], &[hop(t, 1, Some(1.0)), hop(t, 2, None)]);
+            }
+            h.close(t0 + 20);
+        }
+        let mut h = History::open_at(Some(&db.0), limits(), (t0 + 30) as f64);
+        assert_eq!(h.link_changes(), [(t0, Some(wifi.clone()))]);
+        h.set_followed(Some(wifi), t0 + 30);
+        let rows = h.hops(&probe());
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].sent, rows[0].loss), (20, 0.0));
+        assert_eq!((rows[1].sent, rows[1].loss), (20, 1.0));
     }
 
     #[test]
