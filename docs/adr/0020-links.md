@@ -19,8 +19,6 @@ Spec 5.0.0 measures each active Link (Ethernet, Wi-Fi, a VPN) on its own, keeps 
 - Whether `GetBestRoute2` constrained to an interface without a route errors or answers with another interface. Checking the returned interface covers both cases.
 - Whether a source address keeps ICMP on its interface through a full-tunnel VPN, or with a VPN that filters through WFP rather than routes.
 - Whether every VPN adapter shows as `IF_TYPE_PROP_VIRTUAL`, `IF_TYPE_PPP` or `IF_TYPE_TUNNEL`. Only the Link's kind depends on it.
+- What a VPN's firewall does to the Links it doesn't carry. Tailscale with an exit node blocks every physical adapter except DNS through WFP, so the Verdict's Gateway Probes may read as loss (research 08).
 
-## Not yet done
-
-- Throughput is still the Followed Adapter's alone. Per-Link throughput Metrics are a follow-up.
-- Hop statistics and Link changes are kept in memory, not in Raw on disk, so a restart starts them over.
+`tools/linkcheck` measures all four on a machine (research 08 §3).
