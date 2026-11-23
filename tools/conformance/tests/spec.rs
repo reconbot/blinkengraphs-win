@@ -81,13 +81,18 @@ fn verdict() {
         let sample = i["sample"].as_object().map(|m| {
             let mut s = Sample {
                 at: NOW,
-                values: [0.0; Metric::ALL.len()],
-                per_core: vec![],
+                ..Sample::default()
             };
             for metric in Metric::ALL {
                 if let Some(x) = m.get(&format!("{metric:?}")).and_then(Value::as_f64) {
                     s.set(metric, x);
                 }
+            }
+            if let Some(d) = m.get("Disks") {
+                s.disks = serde_json::from_value(d.clone()).unwrap();
+            }
+            if let Some(p) = m.get("MemPressure") {
+                s.pressure = serde_json::from_value(p.clone()).unwrap();
             }
             s
         });
@@ -582,6 +587,67 @@ fn history_raw() {
             json!({"begin": p.begin, "end": p.end}),
             c["expected"],
             "history/raw {}",
+            c["name"]
+        );
+    }
+}
+
+#[test]
+fn history_launch() {
+    for c in load("vectors/history/launch.json")["cases"]
+        .as_array()
+        .unwrap()
+    {
+        let newest = c["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["at"].as_u64().unwrap())
+            .max();
+        let p = Pause::at_launch(
+            newest,
+            c["launch"].as_f64().unwrap(),
+            c["settle_s"].as_f64().unwrap(),
+        );
+        assert_eq!(
+            json!({"begin": p.begin, "end": p.end}),
+            c["expected"],
+            "history/launch {}",
+            c["name"]
+        );
+    }
+}
+
+#[test]
+fn history_link_settle() {
+    for c in load("vectors/history/link-settle.json")["cases"]
+        .as_array()
+        .unwrap()
+    {
+        let changes: Vec<f64> = c["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        let settles = history::pause::link_settle(&changes, c["settle_s"].as_f64().unwrap());
+        let recorded: Vec<u64> = c["rounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                !history::pause::cut(
+                    r["start"].as_f64().unwrap(),
+                    r["end"].as_f64().unwrap(),
+                    &settles,
+                )
+            })
+            .map(|r| r["start"].as_f64().unwrap().floor() as u64)
+            .collect();
+        assert_eq!(
+            json!(recorded),
+            c["expected"],
+            "history/link-settle {}",
             c["name"]
         );
     }

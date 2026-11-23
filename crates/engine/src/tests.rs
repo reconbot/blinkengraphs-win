@@ -13,12 +13,8 @@ struct Fake {
 
 impl Sensors for Fake {
     fn sample(&mut self) -> Option<Sample> {
-        let mut s = Sample {
-            at: 0,
-            values: [0.0; Metric::ALL.len()],
-            per_core: vec![],
-        };
-        s.set(Metric::CpuTotal, 0.2);
+        let mut s = Sample::default();
+        s.set(Metric::CpuBusy, 0.2);
         Some(s)
     }
     fn processes(&mut self, _: usize) -> Vec<ProcessRow> {

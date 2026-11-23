@@ -120,18 +120,23 @@ pub fn populate(h: &mut history::History, s: &Scenario, now: u64) {
                 .collect(),
             ..Default::default()
         };
-        x.set(Metric::CpuTotal, s.cpu[i] as f64 * 100.0);
+        x.set(Metric::CpuBusy, s.cpu[i] as f64 * 100.0);
         x.set(Metric::CpuKernel, s.cpu[i] as f64 * 18.0);
         x.set(Metric::CpuQueue, (s.cpu[i] * 6.0).floor() as f64);
         x.set(Metric::MemCommit, s.memory[i] as f64 * 100.0);
         x.set(Metric::MemPhysical, s.memory[i] as f64 * 90.0);
+        // Bytes read in from disk: 1400 or 20 pages/s of 4 KiB.
         x.set(
-            Metric::MemHardFaults,
-            if s.memory[i] > 0.8 { 1400.0 } else { 20.0 },
+            Metric::MemPageIns,
+            if s.memory[i] > 0.8 {
+                5_734_400.0
+            } else {
+                81_920.0
+            },
         );
         x.set(Metric::NetDown, (s.down[i] as f64).powi(3) * LINK_BPS);
         x.set(Metric::NetUp, (s.up[i] as f64).powi(3) * LINK_BPS);
-        x.set(Metric::DiskActive, s.disk[i] as f64 * 100.0);
+        x.set(Metric::DiskBusy, s.disk[i] as f64 * 100.0);
         x.set(Metric::DiskRead, s.disk[i] as f64 * 80e6);
         x.set(Metric::DiskWrite, s.disk[i] as f64 * 30e6);
         x.set(Metric::DiskResponse, s.disk[i] as f64 * 60.0);

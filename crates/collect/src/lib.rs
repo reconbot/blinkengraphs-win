@@ -50,7 +50,9 @@ impl Collector {
 
     /// All Metric values; rates over the time since the previous call.
     pub fn sample(&mut self) -> Sample {
-        self.inner.sample()
+        let mut s = self.inner.sample();
+        s.pressure = model::Pressure::from_commit(s.get(model::Metric::MemCommit));
+        s
     }
 
     /// Top `limit` processes by CPU plus top `limit` by memory; only called while the Panel is open (ADR 0003).
@@ -72,9 +74,9 @@ mod smoke {
         c.sample();
         std::thread::sleep(std::time::Duration::from_secs(1));
         let s = c.sample();
-        let cpu = s.get(Metric::CpuTotal);
+        let cpu = s.get(Metric::CpuBusy);
         let commit = s.get(Metric::MemCommit);
-        assert!((0.0..=100.0).contains(&cpu), "CpuTotal {cpu}");
+        assert!((0.0..=100.0).contains(&cpu), "CpuBusy {cpu}");
         assert!((0.0..=100.0).contains(&commit), "MemCommit {commit}");
         assert!(commit > 0.0, "MemCommit {commit}");
         assert!(!s.per_core.is_empty());

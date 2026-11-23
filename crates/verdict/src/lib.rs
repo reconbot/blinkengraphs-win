@@ -1,4 +1,4 @@
-use model::{Metric, Probe, ProbeStat, Protocol, Sample, Target};
+use model::{Metric, Pressure, Probe, ProbeStat, Protocol, Sample, Target};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum FaultDomain {
@@ -335,35 +335,44 @@ fn self_saturation(input: &Input, internet: &[&(Probe, ProbeStat)]) -> Option<Fi
     })
 }
 
+/// Paging this fast means the machine is short of memory: 1000 pages/s of 4 KiB.
+const PAGE_INS_HEAVY: f64 = 4_096_000.0;
+
 fn local(input: &Input) -> Vec<Finding> {
     let Some(s) = input.sample else { return vec![] };
     let mut out = Vec::new();
-    let cpu = s.get(Metric::CpuTotal);
+    let cpu = s.get(Metric::CpuBusy);
     if cpu >= 90.0 {
         out.push(crit(
             FaultDomain::LocalLoad,
             format!("CPU pinned at {cpu:.0}%"),
         ));
     }
-    let commit = s.get(Metric::MemCommit);
-    let faults = s.get(Metric::MemHardFaults);
-    if commit >= 90.0 {
+    let page_ins = s.get(Metric::MemPageIns);
+    if s.pressure == Pressure::Critical {
         out.push(crit(
             FaultDomain::LocalLoad,
-            format!("Memory nearly exhausted: commit {commit:.0}%"),
+            "Memory nearly exhausted".into(),
         ));
-    } else if faults >= 1000.0 {
+    } else if page_ins >= PAGE_INS_HEAVY {
         out.push(warn(
             FaultDomain::LocalLoad,
-            format!("Paging heavily: {faults:.0} hard faults/s"),
+            format!("Paging heavily: {}/s from disk", bytes(page_ins)),
         ));
     }
-    let disk = s.get(Metric::DiskActive);
-    let resp = s.get(Metric::DiskResponse);
-    if disk >= 90.0 && resp >= 50.0 {
+    // The busiest saturated disk; the first listed on a tie.
+    if let Some(d) = s
+        .disks
+        .iter()
+        .filter(|d| d.busy >= 90.0 && d.response_ms >= 50.0)
+        .reduce(|a, b| if b.busy > a.busy { b } else { a })
+    {
         out.push(warn(
             FaultDomain::LocalLoad,
-            format!("Disk saturated: {disk:.0}% busy, {resp:.0} ms response"),
+            format!(
+                "Disk saturated: {:.0}% busy, {:.0} ms response",
+                d.busy, d.response_ms
+            ),
         ));
     }
     out
@@ -534,7 +543,7 @@ mod tests {
         let mut ps = healthy();
         set(&mut ps, 5, st(0.0, 600.0, 20.0));
         let mut s = Sample::default();
-        s.set(Metric::CpuTotal, 97.0);
+        s.set(Metric::CpuBusy, 97.0);
         let f = run(&ps, Some(&s));
         assert_eq!(
             (f[0].domain, f[0].severity),
