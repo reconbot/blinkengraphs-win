@@ -25,6 +25,8 @@ pub enum Key {
     Metric(Metric),
     /// A Probe on one Link; `None` where Links aren't known (tests, fixtures).
     Probe(Option<LinkId>, Probe),
+    /// A Metric of one Link's adapter: its throughput.
+    LinkMetric(LinkId, Metric),
 }
 
 impl Key {
@@ -34,10 +36,18 @@ impl Key {
             Key::Metric(m) => format!("metric:{m:?}"),
             Key::Probe(None, p) => format!("probe:{p}"),
             Key::Probe(Some(l), p) => format!("probe:{p} on {l}"),
+            Key::LinkMetric(l, m) => format!("metric:{m:?} on {l}"),
         }
     }
 
     fn from_id(id: &str) -> Option<Key> {
+        if let Some((m, link)) = id
+            .strip_prefix("metric:")
+            .and_then(|r| r.split_once(" on "))
+        {
+            let metric = Metric::ALL.into_iter().find(|x| format!("{x:?}") == m)?;
+            return Some(Key::LinkMetric(link.parse().ok()?, metric));
+        }
         if let Some(m) = id.strip_prefix("metric:") {
             return Metric::ALL
                 .into_iter()
@@ -310,6 +320,21 @@ impl History {
         }
     }
 
+    /// One Link adapter's throughput at `at`, kept apart from the Followed Adapter's Metrics.
+    pub fn record_link_rate(&mut self, link: &LinkId, at: u64, down: f64, up: f64) {
+        self.maintain(at);
+        self.record(
+            Key::LinkMetric(link.clone(), Metric::NetDown),
+            at,
+            Some(down as f32),
+        );
+        self.record(
+            Key::LinkMetric(link.clone(), Metric::NetUp),
+            at,
+            Some(up as f32),
+        );
+    }
+
     /// Which Link the Verdict, the Meters and `now` speak for, from `at` on.
     pub fn set_followed(&mut self, link: Option<LinkId>, at: u64) {
         if self.link_changes.back().map(|c| &c.1) != Some(&link) {
@@ -377,7 +402,7 @@ impl History {
             .keys()
             .filter_map(|k| match k {
                 Key::Probe(l, p) => Some((l.clone(), p.clone())),
-                Key::Metric(_) => None,
+                Key::Metric(_) | Key::LinkMetric(..) => None,
             })
             .collect()
     }

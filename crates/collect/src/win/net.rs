@@ -23,6 +23,11 @@ pub fn followed(choice: &AdapterChoice) -> Option<(u64, NetCounters)> {
         AdapterChoice::FollowDefaultRoute => default_route_luid()?,
         AdapterChoice::Pinned(alias) => luid_of_alias(alias)?,
     };
+    counters(luid)
+}
+
+/// One adapter's counters by NET_LUID.
+pub fn counters(luid: u64) -> Option<(u64, NetCounters)> {
     // GetIfEntry2 reads one row by InterfaceLuid; cheaper than GetIfTable2 every second.
     let mut row = MIB_IF_ROW2 {
         InterfaceLuid: NET_LUID_LH { Value: luid },

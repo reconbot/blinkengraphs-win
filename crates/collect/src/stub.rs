@@ -14,6 +14,8 @@ impl Collector {
         Vec::new()
     }
 
+    pub fn set_links(&mut self, _luids: Vec<u64>) {}
+
     pub fn sample(&mut self) -> Sample {
         Sample {
             at: model::now(),

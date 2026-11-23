@@ -45,6 +45,8 @@ pub trait Sensors: Send {
     fn public_address(&mut self) -> Option<[probe::public::Reading; 2]>;
     /// Looks the Public Address up again soon, as after a Link change.
     fn refresh_public(&mut self);
+    /// The Links' adapters, by NET_LUID, whose throughput each Sample also reports.
+    fn set_links(&mut self, luids: Vec<u64>);
 }
 
 /// The OS adapter: performance counters through `collect`, network state through `probe`.
@@ -163,6 +165,12 @@ impl Sensors for SystemSensors {
 
     fn refresh_public(&mut self) {
         self.refresh.store(true, Ordering::Relaxed);
+    }
+
+    fn set_links(&mut self, luids: Vec<u64>) {
+        if let Some(c) = &mut self.collector {
+            c.set_links(luids);
+        }
     }
 
     fn network(&mut self) -> Network {

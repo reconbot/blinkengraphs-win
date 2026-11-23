@@ -2,7 +2,7 @@ mod net;
 mod pdh;
 mod procs;
 
-use crate::calc::NetTracker;
+use crate::calc::{LinkTracker, NetTracker};
 use crate::{AdapterChoice, AdapterInfo};
 use model::{Metric, ProcessRow, Sample};
 use std::time::Instant;
@@ -12,6 +12,9 @@ pub struct Collector {
     pdh: pdh::Query,
     adapter: AdapterChoice,
     net: NetTracker,
+    /// The Links' adapters, by NET_LUID, whose throughput each Sample also reads.
+    links: Vec<u64>,
+    link_rates: LinkTracker,
     last_sample: Instant,
     procs: procs::Snapshotter,
 }
@@ -22,6 +25,8 @@ impl Collector {
             pdh: pdh::Query::open()?,
             adapter,
             net: NetTracker::default(),
+            links: Vec::new(),
+            link_rates: LinkTracker::default(),
             last_sample: Instant::now(),
             procs: procs::Snapshotter::default(),
         };
@@ -39,6 +44,10 @@ impl Collector {
         net::adapters()
     }
 
+    pub fn set_links(&mut self, luids: Vec<u64>) {
+        self.links = luids;
+    }
+
     pub fn sample(&mut self) -> Sample {
         let now = Instant::now();
         let secs = now.duration_since(self.last_sample).as_secs_f64();
@@ -54,6 +63,12 @@ impl Collector {
         s.set(Metric::NetDown, rates.down);
         s.set(Metric::NetUp, rates.up);
         s.set(Metric::NetErrors, rates.errors);
+        let counters = self
+            .links
+            .iter()
+            .filter_map(|l| net::counters(*l))
+            .collect();
+        s.link_rates = self.link_rates.update(counters, secs);
         s
     }
 

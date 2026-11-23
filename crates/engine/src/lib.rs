@@ -330,6 +330,7 @@ impl<S: Sensors> Monitor<S> {
     fn new(config: Config, shared: Arc<Mutex<Shared>>, mut sensors: S, idle: IdleCheck) -> Self {
         // Links first, so the first Rounds already go out on them.
         let links = sensors.links();
+        sensors.set_links(links.iter().map(|l| l.id.luid).collect());
         let (prober, events) = Prober::start(groups_on(&config, &links), config.probe_limits());
         {
             let mut s = shared.lock().unwrap();
@@ -450,6 +451,8 @@ impl<S: Sensors> Monitor<S> {
                 v.retain(|p| p.end > wall - 60.0);
             }
             self.prober.reconfigure(groups_on(&self.config, &links));
+            self.sensors
+                .set_links(links.iter().map(|l| l.id.luid).collect());
             // The way out may have changed (spec `rules/public-address.md`, Refresh).
             self.sensors.refresh_public();
             s.links = links;
@@ -523,6 +526,16 @@ impl<S: Sensors> Monitor<S> {
 
         let mut s = self.shared.lock().unwrap();
         s.history.record_sample(&sample);
+        for r in &sample.link_rates {
+            if let Some(l) = s
+                .links
+                .iter()
+                .find(|l| l.id.luid == r.luid)
+                .map(|l| l.id.clone())
+            {
+                s.history.record_link_rate(&l, at, r.down, r.up);
+            }
+        }
         if let Some(p) = procs {
             s.processes = p;
         }

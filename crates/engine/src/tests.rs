@@ -9,13 +9,18 @@ struct Fake {
     process_reads: Arc<AtomicUsize>,
     slept: Arc<Mutex<f64>>,
     links: Arc<Mutex<Vec<model::Link>>>,
+    link_rates: Vec<model::LinkRate>,
+    watched_links: Arc<Mutex<Vec<u64>>>,
     public: Option<[probe::public::Reading; 2]>,
     public_refreshes: Arc<AtomicUsize>,
 }
 
 impl Sensors for Fake {
     fn sample(&mut self) -> Option<Sample> {
-        let mut s = Sample::default();
+        let mut s = Sample {
+            link_rates: self.link_rates.clone(),
+            ..Sample::default()
+        };
         s.set(Metric::CpuBusy, 0.2);
         Some(s)
     }
@@ -38,6 +43,9 @@ impl Sensors for Fake {
     }
     fn public_address(&mut self) -> Option<[probe::public::Reading; 2]> {
         self.public.clone()
+    }
+    fn set_links(&mut self, luids: Vec<u64>) {
+        *self.watched_links.lock().unwrap() = luids;
     }
     fn refresh_public(&mut self) {
         self.public_refreshes.fetch_add(1, Ordering::Relaxed);
@@ -436,4 +444,25 @@ fn the_public_address_reaches_the_panel_and_refreshes_when_the_links_change() {
     links.lock().unwrap().push(link(2, "Wi-Fi", true));
     m.tick(t0 + Duration::from_secs(10), WALL + 10.0);
     assert_eq!(refreshes.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn each_link_s_throughput_is_recorded_under_that_link() {
+    let wifi = link(2, "Wi-Fi", true);
+    let fake = Fake {
+        link_rates: vec![model::LinkRate {
+            luid: 2,
+            down: 5000.0,
+            up: 300.0,
+        }],
+        ..Fake::default()
+    };
+    *fake.links.lock().unwrap() = vec![wifi.clone()];
+    let watched = fake.watched_links.clone();
+    let mut m = monitor(fake, false);
+    m.tick(Instant::now(), WALL);
+    assert_eq!(*watched.lock().unwrap(), [2]);
+    let h = &m.shared.lock().unwrap().history;
+    let down = h.recent(&history::Key::LinkMetric(wifi.id, Metric::NetDown), 5);
+    assert_eq!(down, [Some(5000.0)]);
 }
