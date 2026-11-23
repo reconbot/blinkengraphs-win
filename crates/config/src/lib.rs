@@ -70,8 +70,11 @@ impl Default for ProbeView {
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
-    /// Light or dark for every Surface and the Panel (spec `CONTEXT.md` Appearance).
+    /// Light or dark for the Panel (spec `CONTEXT.md` Appearance).
     pub mode: Mode,
+    /// Light or dark for the Surfaces on the taskbar. Apart from `mode` so a dark Panel doesn't
+    /// draw pale colors on a light taskbar (ADR 0023).
+    pub taskbar: Mode,
     pub preset: palette::Preset,
     #[serde(flatten)]
     pub overrides: palette::Overrides,
@@ -97,8 +100,19 @@ impl Appearance {
         }
     }
 
+    /// The Panel's colors.
     pub fn palette(&self, system: palette::Shade) -> palette::Palette {
         palette::Palette::new(self.preset, self.shade(system), &self.overrides)
+    }
+
+    /// The colors for the Strip and tray icons, drawn on a taskbar of shade `taskbar`.
+    pub fn taskbar_palette(&self, taskbar: palette::Shade) -> palette::Palette {
+        let shade = match self.taskbar {
+            Mode::System => taskbar,
+            Mode::Light => palette::Shade::Light,
+            Mode::Dark => palette::Shade::Dark,
+        };
+        palette::Palette::new(self.preset, shade, &self.overrides)
     }
 }
 
@@ -730,9 +744,30 @@ mod tests {
     }
 
     #[test]
+    fn the_taskbar_follows_its_own_shade_while_the_panel_is_dark() {
+        use palette::Shade::{Dark, Light};
+        let mut a = Config::default().appearance;
+        assert_eq!(a.palette(Light).shade, Dark);
+        assert_eq!(a.taskbar_palette(Light).shade, Light);
+        assert_eq!(a.taskbar_palette(Dark).shade, Dark);
+        a.taskbar = Mode::Dark;
+        assert_eq!(a.taskbar_palette(Light).shade, Dark);
+        a.taskbar = Mode::Light;
+        assert_eq!(a.taskbar_palette(Dark).shade, Light);
+    }
+
+    #[test]
+    fn a_config_saved_before_the_taskbar_theme_follows_the_taskbar() {
+        let c = Config::parse("[appearance]\nmode = \"dark\"\n").unwrap();
+        assert_eq!(c.appearance.mode, Mode::Dark);
+        assert_eq!(c.appearance.taskbar, Mode::System);
+    }
+
+    #[test]
     fn appearance_round_trips() {
         let mut c = Config::default();
         c.appearance.mode = Mode::Light;
+        c.appearance.taskbar = Mode::Dark;
         c.appearance.preset = palette::Preset::ColorBlind;
         c.appearance
             .overrides

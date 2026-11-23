@@ -102,7 +102,7 @@ pub fn draw(
         section,
         &series(section, h, config, shown, px as usize, now).meter(),
         px,
-        &config.appearance.palette(taskbar),
+        &config.appearance.taskbar_palette(taskbar),
     )
 }
 
@@ -197,7 +197,7 @@ pub fn strip(
         height,
         scale,
         font,
-        &config.appearance.palette(taskbar),
+        &config.appearance.taskbar_palette(taskbar),
     )
 }
 
@@ -211,14 +211,18 @@ pub fn menu_icon(
     now: u64,
 ) -> Image {
     match config.menu_icon {
-        MenuIcon::App => render::app_icon(px, &config.appearance.palette(taskbar), None),
+        MenuIcon::App => render::app_icon(px, &config.appearance.taskbar_palette(taskbar), None),
         MenuIcon::Verdict => {
             let status = match findings.first().map(|f| f.severity) {
                 Some(verdict::Severity::Crit) => Status::Crit,
                 Some(verdict::Severity::Warn) => Status::Warn,
                 _ => Status::Ok,
             };
-            render::app_icon(px, &config.appearance.palette(taskbar), Some(status))
+            render::app_icon(
+                px,
+                &config.appearance.taskbar_palette(taskbar),
+                Some(status),
+            )
         }
         MenuIcon::Meter(section) => {
             let c = config.section(section);
@@ -317,6 +321,21 @@ mod tests {
                 "{section:?} drew nothing"
             );
         }
+    }
+
+    #[test]
+    fn the_strip_draws_for_the_taskbar_not_the_panel_theme() {
+        let mut h = History::open(None, Config::default().history_limits());
+        fixtures::populate(&mut h, &fixtures::all().remove(2), 1_800_000_000);
+        let at = 1_800_000_000;
+        let draw = |c: &Config| strip(&h, c, 40, 1.0, None, Taskbar::Light, at);
+        let dark_panel = Config::default();
+        let mut light = Config::default();
+        light.appearance.mode = config::Mode::Light;
+        let mut forced = Config::default();
+        forced.appearance.taskbar = config::Mode::Dark;
+        assert_eq!(draw(&dark_panel).pixels(), draw(&light).pixels());
+        assert_ne!(draw(&dark_panel).pixels(), draw(&forced).pixels());
     }
 
     #[test]
