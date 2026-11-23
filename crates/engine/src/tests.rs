@@ -310,3 +310,18 @@ fn links_reach_the_panel_and_history_follows_one() {
     assert_eq!(s.links.len(), 1);
     assert_eq!(s.history.followed(), Some(&s.links[0].id));
 }
+
+#[test]
+fn links_known_at_start_leave_no_unlinked_series() {
+    let fake = Fake::default();
+    *fake.links.lock().unwrap() = vec![link(1, "Wi-Fi", true)];
+    let mut m = monitor(fake, false);
+    // A Round from before the Prober learned the Links went where the OS routed it: the
+    // default-route Link.
+    m.round(round(WALL + 0.1, WALL + 0.2));
+    let s = m.shared.lock().unwrap();
+    assert_eq!(s.links.len(), 1);
+    let keys = s.history.series_keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].0, Some(s.links[0].id.clone()));
+}
